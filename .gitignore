@@ -6,6 +6,7 @@
 *.ear
 .idea
 *.iml
+**/build/
 
 target
 isoparser/aac-sample.mp4
