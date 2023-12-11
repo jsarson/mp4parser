@@ -74,6 +74,13 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         this.targetDuration = targetDuration;
     }
 
+    private WriterOutputCallback outputCallback;
+
+    public void setOutputCallback(WriterOutputCallback outputCallback) {
+        this.outputCallback = outputCallback;
+    }
+
+
     public FragmentedMp4Writer(List<StreamingTrack> source, WritableByteChannel sink) throws IOException {
         this.source = new LinkedList<StreamingTrack>(source);
         this.sink = sink;
@@ -119,7 +126,11 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
      */
     public synchronized void close() throws IOException {
         for (StreamingTrack streamingTrack : source) {
-            writeFragment(createFragment(streamingTrack, sampleBuffers.get(streamingTrack)));
+            Box[] fragments = createFragment(streamingTrack, sampleBuffers.get(streamingTrack));
+            writeFragment(fragments);
+            if(outputCallback != null) {
+                outputCallback.onSegmentReady(streamingTrack, nextSampleStartTime.get(streamingTrack) - nextFragmentCreateStartTime.get(streamingTrack));
+            }
             streamingTrack.close();
         }
         writeFooter(createFooter());
@@ -267,6 +278,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                         FragmentContainer currentFragmentContainer = tracksFragmentQueue.remove();
 
                         writeFragment(currentFragmentContainer.fragmentContent);
+
+                        if(outputCallback != null) {
+                            outputCallback.onSegmentReady(currentStreamingTrack, currentFragmentContainer.duration);
+                        }
 
                         congestionControl.get(currentStreamingTrack).countDown();
                         long ts = nextFragmentWriteStartTime.get(currentStreamingTrack) + currentFragmentContainer.duration;
