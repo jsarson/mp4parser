@@ -65,6 +65,15 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     long bytesWritten = 0;
     volatile boolean headerWritten = false;
 
+    private long targetDuration = 3000;
+
+    public void setTargetDuration(long targetDuration) {
+        if(targetDuration <= 0) {
+            throw new IllegalStateException("target duration must be positive");
+        }
+        this.targetDuration = targetDuration;
+    }
+
     public FragmentedMp4Writer(List<StreamingTrack> source, WritableByteChannel sink) throws IOException {
         this.source = new LinkedList<StreamingTrack>(source);
         this.sink = sink;
@@ -98,7 +107,6 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                 streamingTrack.addTrackExtension(tiExt);
             }
         }
-
     }
 
     /**
@@ -272,6 +280,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                     if (fragmentQueue.size() > 10) {
                         // if there are more than 10 fragments in the queue we don't want more samples of this track
                         // System.err.println("Stopping " + streamingTrack);
+//                        throw new RuntimeException("not synchronized tracks shutting down");
                         congestionControl.put(streamingTrack, new CountDownLatch(fragmentQueue.size()));
                     }
                 }
@@ -301,7 +310,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         long ts = nextSampleStartTime.get(streamingTrack);
         long cfst = nextFragmentCreateStartTime.get(streamingTrack);
 
-        if ((ts > cfst + 3 * streamingTrack.getTimescale())) {
+        if ((ts > cfst + 3/*((double) targetDuration / 1000.0)*/ * streamingTrack.getTimescale())) {
             // mininum fragment length == 3 seconds
             SampleFlagsSampleExtension sfExt = next.getSampleExtension(SampleFlagsSampleExtension.class);
             if (sfExt == null || sfExt.isSyncSample()) {
