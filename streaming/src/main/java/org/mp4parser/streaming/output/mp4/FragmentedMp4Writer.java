@@ -129,7 +129,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             Box[] fragments = createFragment(streamingTrack, sampleBuffers.get(streamingTrack));
             writeFragment(fragments);
             if(outputCallback != null) {
-                outputCallback.onSegmentReady(streamingTrack, nextSampleStartTime.get(streamingTrack) - nextFragmentCreateStartTime.get(streamingTrack), true);
+                outputCallback.onSegmentReady(streamingTrack, nextSampleStartTime.get(streamingTrack) - nextFragmentCreateStartTime.get(streamingTrack), false);
             }
             streamingTrack.close();
         }
