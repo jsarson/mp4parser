@@ -244,6 +244,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
                     writeHeader(createHeader());
                     headerWritten = true;
+                    outputCallback.onSegmentReady(null, 0, true);
                 }
             }
         }
@@ -325,7 +326,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         long ts = nextSampleStartTime.get(streamingTrack);
         long cfst = nextFragmentCreateStartTime.get(streamingTrack);
 
-        if ((ts > cfst + 3/*((double) targetDuration / 1000.0)*/ * streamingTrack.getTimescale())) {
+        if ((ts > cfst + ((double) targetDuration / 1000.0) * streamingTrack.getTimescale())) {
             // mininum fragment length == 3 seconds
             SampleFlagsSampleExtension sfExt = next.getSampleExtension(SampleFlagsSampleExtension.class);
             if (sfExt == null || sfExt.isSyncSample()) {
