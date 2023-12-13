@@ -236,90 +236,222 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         });
     }
 
-    public void acceptSample(StreamingSample streamingSample, StreamingTrack streamingTrack) throws IOException {
-
-        synchronized (OBJ) {
-            // need to synchronized here - I don't want two headers written under any circumstances
-            if (!headerWritten) {
-                boolean allTracksAtLeastOneSample = true;
-                for (StreamingTrack track : source) {
-                    allTracksAtLeastOneSample &= (nextSampleStartTime.get(track) > 0 || track == streamingTrack);
-                }
-                if (allTracksAtLeastOneSample) {
-
-                    writeHeader(createHeader());
-                    headerWritten = true;
-                    outputCallback.onSegmentReady(null, 0, true);
-                }
+    private StreamingTrack findTrackByClassName(String name) {
+        for (StreamingTrack track : source) {
+            if(track.getClass().getSimpleName().equals(name)) {
+                return track;
             }
         }
+        throw new RuntimeException("track not found");
+    }
 
-        try {
-            CountDownLatch cdl = congestionControl.get(streamingTrack);
-            if (cdl.getCount() > 0) {
-                cdl.await();
+    FragmentContainer videoFragmentContainer = null;
+
+    private synchronized void writeHeader(StreamingTrack streamingTrack) throws IOException {
+        if (!headerWritten) {
+            boolean allTracksAtLeastOneSample = true;
+            for (StreamingTrack track : source) {
+                allTracksAtLeastOneSample &= (nextSampleStartTime.get(track) > 0 || track == streamingTrack);
             }
-        } catch (InterruptedException e) {
-            // don't care just move on
+            if (allTracksAtLeastOneSample) {
+
+                writeHeader(createHeader());
+                headerWritten = true;
+                outputCallback.onSegmentReady(null, 0, true);
+            }
         }
+    }
 
-        if (isFragmentReady(streamingTrack, streamingSample)) {
+    private synchronized void acceptVideo(StreamingSample H264Frame, StreamingTrack videoTrack) throws IOException {
+        if (headerWritten && videoFragmentContainer == null && isFragmentReady(videoTrack, H264Frame)) { // video is ready FragmentContainer videoFragmentContainer = createFragmentContainer(streamingTrack);
+            videoFragmentContainer = createFragmentContainer(videoTrack);
+            sampleBuffers.get(videoTrack).clear();
+            LOG.debug("putting new start time video: "+  convertTimescaleDurationToSeconds((nextFragmentCreateStartTime.get(videoTrack) + videoFragmentContainer.duration), videoTrack.getTimescale()));
 
-            FragmentContainer fragmentContainer = createFragmentContainer(streamingTrack);
-            //System.err.println("Creating fragment for " + streamingTrack);
-            sampleBuffers.get(streamingTrack).clear();
-            nextFragmentCreateStartTime.put(streamingTrack, nextFragmentCreateStartTime.get(streamingTrack) + fragmentContainer.duration);
-            Queue<FragmentContainer> fragmentQueue = fragmentBuffers.get(streamingTrack);
-            fragmentQueue.add(fragmentContainer);
-            synchronized (OBJ) {
-                if (headerWritten && this.source.get(0) == streamingTrack) {
+            writeFragment(videoFragmentContainer.fragmentContent);
 
-                    Queue<FragmentContainer> tracksFragmentQueue;
-                    StreamingTrack currentStreamingTrack;
-                    // This will write AT LEAST the currently created fragment and possibly a few more
-                    while (!(tracksFragmentQueue = fragmentBuffers.get(
-                            (currentStreamingTrack = this.source.get(0))
-                    )).isEmpty()) {
+            nextFragmentWriteStartTime.put(videoTrack, nextFragmentCreateStartTime.get(videoTrack));
+            nextFragmentCreateStartTime.put(videoTrack, nextFragmentCreateStartTime.get(videoTrack) + videoFragmentContainer.duration);
+        }
+    }
 
-                        FragmentContainer currentFragmentContainer = tracksFragmentQueue.remove();
+    private synchronized void acceptAudio(StreamingSample aacAudio, StreamingTrack audioTrack) throws IOException {
+        StreamingTrack videoTrack = findTrackByClassName("CustomH264AnnexBTrack");
 
-                        writeFragment(currentFragmentContainer.fragmentContent);
+        double videoEnd = (double) nextFragmentCreateStartTime.get(videoTrack) / (double) videoTrack.getTimescale();
+        double currentAudio = (double) nextFragmentCreateStartTime.get(audioTrack) / (double) audioTrack.getTimescale();
+        LOG.debug("nextVideo" + nextFragmentCreateStartTime.get(videoTrack).toString() + "nextAudio" + nextFragmentCreateStartTime.get(audioTrack).toString());
+        LOG.debug("videoEnd: " + videoEnd + " currentAudio: " + currentAudio);
+        long targetAudioDurationFromVideoMs = (long)((videoEnd * 1_000 - currentAudio * 1_000));
 
-                        if(outputCallback != null) {
-                            outputCallback.onSegmentReady(
-                                    currentStreamingTrack,
-                                    convertTimescaleDurationToMs(
-                                            currentFragmentContainer.duration, currentStreamingTrack.getTimescale()
-                                    ),
-                                    false);
-                        }
 
-                        congestionControl.get(currentStreamingTrack).countDown();
-                        long ts = nextFragmentWriteStartTime.get(currentStreamingTrack) + currentFragmentContainer.duration;
-                        nextFragmentWriteStartTime.put(currentStreamingTrack, ts);
-                        if (LOG.isDebugEnabled()) {
-                            LOG.debug(currentStreamingTrack + " advanced to " + (double) ts / currentStreamingTrack.getTimescale());
-                        }
-                        sortTracks();
-                    }
+
+
+
+        if(videoFragmentContainer != null && isFragmentReady(audioTrack, aacAudio, targetAudioDurationFromVideoMs)) {
+            //FragmentContainer audioFragmentContainer = createFragmentContainer(streamingTrack);
+
+            LOG.debug("targetAudioDurationFromVideoMs: " + targetAudioDurationFromVideoMs);
+
+            FragmentContainer fragmentContainer = new FragmentContainer();
+            ArrayList<StreamingSample> usedSamples = new  ArrayList<>();
+            long durationCounting = 0;
+
+            for(StreamingSample sample : sampleBuffers.get(audioTrack)) {
+                if(durationCounting < targetAudioDurationFromVideoMs / 1_000 * audioTrack.getTimescale()) {
+                    usedSamples.add(sample);
+                    durationCounting += sample.getDuration();
                 } else {
-                    if (fragmentQueue.size() > 10) {
-                        // if there are more than 10 fragments in the queue we don't want more samples of this track
-                        // System.err.println("Stopping " + streamingTrack);
-//                        throw new RuntimeException("not synchronized tracks shutting down");
-                        congestionControl.put(streamingTrack, new CountDownLatch(fragmentQueue.size()));
-                    }
+                    break;
                 }
             }
 
+            LOG.debug("durationCounting: " + durationCounting * 1000.0 / audioTrack.getTimescale() + " targetAudioDurationFromVideo: " + targetAudioDurationFromVideoMs);
 
+            fragmentContainer.fragmentContent = createFragment(audioTrack, usedSamples);
+            fragmentContainer.duration = durationCounting;
+
+            writeFragment(fragmentContainer.fragmentContent);
+
+            if(outputCallback != null) {
+                outputCallback.onSegmentReady(
+                        videoTrack,
+                        convertTimescaleDurationToMs(
+                                videoFragmentContainer.duration, videoTrack.getTimescale()
+                        ),
+                        false);
+            }
+
+            if (usedSamples.size() > 0) {
+                sampleBuffers.get(audioTrack).subList(0, usedSamples.size()).clear();
+            }
+
+            LOG.debug("putting new start Time audio: " + convertTimescaleDurationToSeconds((nextFragmentCreateStartTime.get(audioTrack) + fragmentContainer.duration), audioTrack.getTimescale()));
+            nextFragmentWriteStartTime.put(audioTrack, nextFragmentCreateStartTime.get(audioTrack));
+            nextFragmentCreateStartTime.put(audioTrack, nextFragmentCreateStartTime.get(audioTrack) + fragmentContainer.duration);
+            videoFragmentContainer = null;
+
+            //fragmentContainer is ready
         }
+    }
 
+    private void acceptSampleCamerito(StreamingSample streamingSample, StreamingTrack streamingTrack) throws IOException {
+        writeHeader(streamingTrack);
+
+        if(streamingTrack.getClass().getSimpleName().equals("CustomH264AnnexBTrack")) {
+            LOG.debug("is video");
+            acceptVideo(streamingSample, streamingTrack);
+        } else {
+            LOG.debug("is audio");
+            acceptAudio(streamingSample, streamingTrack);
+        }
 
         sampleBuffers.get(streamingTrack).add(streamingSample);
         nextSampleStartTime.put(streamingTrack, nextSampleStartTime.get(streamingTrack) + streamingSample.getDuration());
+    }
+
+    public void acceptSample(StreamingSample streamingSample, StreamingTrack streamingTrack) throws IOException {
+        acceptSampleCamerito(streamingSample, streamingTrack);
+//        synchronized (OBJ) {
+//            // need to synchronized here - I don't want two headers written under any circumstances
+//            if (!headerWritten) {
+//                boolean allTracksAtLeastOneSample = true;
+//                for (StreamingTrack track : source) {
+//                    allTracksAtLeastOneSample &= (nextSampleStartTime.get(track) > 0 || track == streamingTrack);
+//                }
+//                if (allTracksAtLeastOneSample) {
+//
+//                    writeHeader(createHeader());
+//                    headerWritten = true;
+//                    outputCallback.onSegmentReady(null, 0, true);
+//                }
+//            }
+//        }
+//
+//        try {
+//            CountDownLatch cdl = congestionControl.get(streamingTrack);
+//            if (cdl.getCount() > 0) {
+//                cdl.await();
+//            }
+//        } catch (InterruptedException e) {
+//            // don't care just move on
+//        }
+//
+//        if (isFragmentReady(streamingTrack, streamingSample)) {
+//
+//            LOG.debug("start");
+//            FragmentContainer fragmentContainer = createFragmentContainer(streamingTrack);
+//            //System.err.println("Creating fragment for " + streamingTrack);
+//            sampleBuffers.get(streamingTrack).clear();
+//            nextFragmentCreateStartTime.put(streamingTrack, nextFragmentCreateStartTime.get(streamingTrack) + fragmentContainer.duration);
+//            Queue<FragmentContainer> fragmentQueue = fragmentBuffers.get(streamingTrack);
+//            fragmentQueue.add(fragmentContainer);
+//            synchronized (OBJ) {
+//                if (headerWritten && this.source.get(0) == streamingTrack) {
+//
+//                    Queue<FragmentContainer> tracksFragmentQueue;
+//                    StreamingTrack currentStreamingTrack;
+//                    // This will write AT LEAST the currently created fragment and possibly a few more
+//                    while (!(tracksFragmentQueue = fragmentBuffers.get(
+//                            (currentStreamingTrack = this.source.get(0))
+//                    )).isEmpty()) {
+//                        FragmentContainer currentFragmentContainer = tracksFragmentQueue.remove();
+//                        writeFragment(currentFragmentContainer.fragmentContent);
+//
+//                        LOG.debug("Fragment written" + currentStreamingTrack + " " + convertTimescaleDurationToMs(
+//                                currentFragmentContainer.duration,
+//                                currentStreamingTrack.getTimescale())
+//                        );
+//                        if(outputCallback != null) {
+//                            outputCallback.onSegmentReady(
+//                                    currentStreamingTrack,
+//                                    convertTimescaleDurationToMs(
+//                                            currentFragmentContainer.duration, currentStreamingTrack.getTimescale()
+//                                    ),
+//                                    false);
+//                        }
+//
+//                        congestionControl.get(currentStreamingTrack).countDown();
+//                        long ts = nextFragmentWriteStartTime.get(currentStreamingTrack) + currentFragmentContainer.duration;
+//                        nextFragmentWriteStartTime.put(currentStreamingTrack, ts);
+//                        //if (LOG.isDebugEnabled()) {
+//                            LOG.debug(currentStreamingTrack + " advanced to " + (double) ts / currentStreamingTrack.getTimescale());
+//                        //}
+//                        sortTracks();
+//                    }
+//                } else {
+//                    if (fragmentQueue.size() > 10) {
+//                        // if there are more than 10 fragments in the queue we don't want more samples of this track
+//                        // System.err.println("Stopping " + streamingTrack);
+//                        //throw new RuntimeException("not synchronized tracks shutting down");
+//                        congestionControl.put(streamingTrack, new CountDownLatch(fragmentQueue.size()));
+//                    }
+//                }
+//                LOG.debug("stop");
+//            }
+//        }
+//
+//
+//        sampleBuffers.get(streamingTrack).add(streamingSample);
+//        nextSampleStartTime.put(streamingTrack, nextSampleStartTime.get(streamingTrack) + streamingSample.getDuration());
+    }
 
 
+    protected boolean isFragmentReady(StreamingTrack streamingTrack, StreamingSample next, long targetDurationMs) {
+        long ts = nextSampleStartTime.get(streamingTrack); // přiřítá
+        long cfst = nextFragmentCreateStartTime.get(streamingTrack); //0
+
+        if ((ts > cfst + ((double) targetDurationMs / 1000.0) * streamingTrack.getTimescale())) {
+            // mininum fragment length == 3 seconds
+            SampleFlagsSampleExtension sfExt = next.getSampleExtension(SampleFlagsSampleExtension.class);
+            if (sfExt == null || sfExt.isSyncSample()) {
+                //System.err.println(streamingTrack + " ready at " + ts);
+                // the next sample needs to be a sync sample
+                // when there is no SampleFlagsSampleExtension we assume syncSample == true
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -350,8 +482,14 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     }
 
     protected Box[] createFragment(StreamingTrack streamingTrack, List<StreamingSample> samples) {
-        nextFragmentCreateStartTime.get(streamingTrack);
+       // nextFragmentCreateStartTime.get(streamingTrack);
+
         tfraOffsets.put(streamingTrack, Mp4Arrays.copyOfAndAppend(tfraOffsets.get(streamingTrack), bytesWritten));
+
+        String className = streamingTrack.getClass().getSimpleName();
+
+        LOG.debug("createFrqagment track" + className + ": " + convertTimescaleDurationToSeconds(nextFragmentCreateStartTime.get(streamingTrack), streamingTrack.getTimescale()));
+
         tfraTimes.put(streamingTrack, Mp4Arrays.copyOfAndAppend(tfraTimes.get(streamingTrack), nextFragmentCreateStartTime.get(streamingTrack)));
 
         LOG.trace("Container created");
@@ -645,8 +783,12 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         };
     }
 
+    private double convertTimescaleDurationToSeconds(long duration, long timescale) {
+        return (double) duration / (double) timescale;
+    }
+
     private long convertTimescaleDurationToMs(long duration, long timescale) {
-        return (long) (1000.0 * (double) duration / (double) timescale);
+        return (long) (convertTimescaleDurationToSeconds(duration, timescale) * 1000);
     }
 
     public class FragmentContainer {
