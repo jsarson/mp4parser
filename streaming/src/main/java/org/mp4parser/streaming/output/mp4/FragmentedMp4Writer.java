@@ -129,7 +129,12 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             Box[] fragments = createFragment(streamingTrack, sampleBuffers.get(streamingTrack));
             writeFragment(fragments);
             if(outputCallback != null) {
-                outputCallback.onSegmentReady(streamingTrack, nextSampleStartTime.get(streamingTrack) - nextFragmentCreateStartTime.get(streamingTrack), false);
+                outputCallback.onSegmentReady(
+                        streamingTrack,
+                        convertTimescaleDurationToMs(
+                        nextSampleStartTime.get(streamingTrack) - nextFragmentCreateStartTime.get(streamingTrack), streamingTrack.getTimescale()
+                        ),
+                        false);
             }
             streamingTrack.close();
         }
@@ -281,7 +286,12 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                         writeFragment(currentFragmentContainer.fragmentContent);
 
                         if(outputCallback != null) {
-                            outputCallback.onSegmentReady(currentStreamingTrack, currentFragmentContainer.duration, false);
+                            outputCallback.onSegmentReady(
+                                    currentStreamingTrack,
+                                    convertTimescaleDurationToMs(
+                                            currentFragmentContainer.duration, currentStreamingTrack.getTimescale()
+                                    ),
+                                    false);
                         }
 
                         congestionControl.get(currentStreamingTrack).countDown();
@@ -633,6 +643,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             }
 
         };
+    }
+
+    private long convertTimescaleDurationToMs(long duration, long timescale) {
+        return (long) (1000.0 * (double) duration / (double) timescale);
     }
 
     public class FragmentContainer {
