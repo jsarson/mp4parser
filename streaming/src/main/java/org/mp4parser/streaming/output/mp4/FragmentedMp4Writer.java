@@ -266,7 +266,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         if (headerWritten && videoFragmentContainer == null && isFragmentReady(videoTrack, H264Frame)) { // video is ready FragmentContainer videoFragmentContainer = createFragmentContainer(streamingTrack);
             videoFragmentContainer = createFragmentContainer(videoTrack);
             sampleBuffers.get(videoTrack).clear();
-            LOG.debug("putting new start time video: "+  convertTimescaleDurationToSeconds((nextFragmentCreateStartTime.get(videoTrack) + videoFragmentContainer.duration), videoTrack.getTimescale()));
+            LOG.debug("putting new start time video: " +  convertTimescaleDurationToSeconds((nextFragmentCreateStartTime.get(videoTrack) + videoFragmentContainer.duration), videoTrack.getTimescale()));
 
             writeFragment(videoFragmentContainer.fragmentContent);
 
@@ -283,10 +283,6 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         LOG.debug("nextVideo" + nextFragmentCreateStartTime.get(videoTrack).toString() + "nextAudio" + nextFragmentCreateStartTime.get(audioTrack).toString());
         LOG.debug("videoEnd: " + videoEnd + " currentAudio: " + currentAudio);
         long targetAudioDurationFromVideoMs = (long)((videoEnd * 1_000 - currentAudio * 1_000));
-
-
-
-
 
         if(videoFragmentContainer != null && isFragmentReady(audioTrack, aacAudio, targetAudioDurationFromVideoMs)) {
             //FragmentContainer audioFragmentContainer = createFragmentContainer(streamingTrack);
@@ -330,8 +326,6 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             nextFragmentWriteStartTime.put(audioTrack, nextFragmentCreateStartTime.get(audioTrack));
             nextFragmentCreateStartTime.put(audioTrack, nextFragmentCreateStartTime.get(audioTrack) + fragmentContainer.duration);
             videoFragmentContainer = null;
-
-            //fragmentContainer is ready
         }
     }
 
@@ -347,99 +341,20 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         }
 
         sampleBuffers.get(streamingTrack).add(streamingSample);
+        LOG.debug("streaming sample duration:"+ streamingSample.getDuration());
         nextSampleStartTime.put(streamingTrack, nextSampleStartTime.get(streamingTrack) + streamingSample.getDuration());
     }
 
     public void acceptSample(StreamingSample streamingSample, StreamingTrack streamingTrack) throws IOException {
         acceptSampleCamerito(streamingSample, streamingTrack);
-//        synchronized (OBJ) {
-//            // need to synchronized here - I don't want two headers written under any circumstances
-//            if (!headerWritten) {
-//                boolean allTracksAtLeastOneSample = true;
-//                for (StreamingTrack track : source) {
-//                    allTracksAtLeastOneSample &= (nextSampleStartTime.get(track) > 0 || track == streamingTrack);
-//                }
-//                if (allTracksAtLeastOneSample) {
-//
-//                    writeHeader(createHeader());
-//                    headerWritten = true;
-//                    outputCallback.onSegmentReady(null, 0, true);
-//                }
-//            }
-//        }
-//
-//        try {
-//            CountDownLatch cdl = congestionControl.get(streamingTrack);
-//            if (cdl.getCount() > 0) {
-//                cdl.await();
-//            }
-//        } catch (InterruptedException e) {
-//            // don't care just move on
-//        }
-//
-//        if (isFragmentReady(streamingTrack, streamingSample)) {
-//
-//            LOG.debug("start");
-//            FragmentContainer fragmentContainer = createFragmentContainer(streamingTrack);
-//            //System.err.println("Creating fragment for " + streamingTrack);
-//            sampleBuffers.get(streamingTrack).clear();
-//            nextFragmentCreateStartTime.put(streamingTrack, nextFragmentCreateStartTime.get(streamingTrack) + fragmentContainer.duration);
-//            Queue<FragmentContainer> fragmentQueue = fragmentBuffers.get(streamingTrack);
-//            fragmentQueue.add(fragmentContainer);
-//            synchronized (OBJ) {
-//                if (headerWritten && this.source.get(0) == streamingTrack) {
-//
-//                    Queue<FragmentContainer> tracksFragmentQueue;
-//                    StreamingTrack currentStreamingTrack;
-//                    // This will write AT LEAST the currently created fragment and possibly a few more
-//                    while (!(tracksFragmentQueue = fragmentBuffers.get(
-//                            (currentStreamingTrack = this.source.get(0))
-//                    )).isEmpty()) {
-//                        FragmentContainer currentFragmentContainer = tracksFragmentQueue.remove();
-//                        writeFragment(currentFragmentContainer.fragmentContent);
-//
-//                        LOG.debug("Fragment written" + currentStreamingTrack + " " + convertTimescaleDurationToMs(
-//                                currentFragmentContainer.duration,
-//                                currentStreamingTrack.getTimescale())
-//                        );
-//                        if(outputCallback != null) {
-//                            outputCallback.onSegmentReady(
-//                                    currentStreamingTrack,
-//                                    convertTimescaleDurationToMs(
-//                                            currentFragmentContainer.duration, currentStreamingTrack.getTimescale()
-//                                    ),
-//                                    false);
-//                        }
-//
-//                        congestionControl.get(currentStreamingTrack).countDown();
-//                        long ts = nextFragmentWriteStartTime.get(currentStreamingTrack) + currentFragmentContainer.duration;
-//                        nextFragmentWriteStartTime.put(currentStreamingTrack, ts);
-//                        //if (LOG.isDebugEnabled()) {
-//                            LOG.debug(currentStreamingTrack + " advanced to " + (double) ts / currentStreamingTrack.getTimescale());
-//                        //}
-//                        sortTracks();
-//                    }
-//                } else {
-//                    if (fragmentQueue.size() > 10) {
-//                        // if there are more than 10 fragments in the queue we don't want more samples of this track
-//                        // System.err.println("Stopping " + streamingTrack);
-//                        //throw new RuntimeException("not synchronized tracks shutting down");
-//                        congestionControl.put(streamingTrack, new CountDownLatch(fragmentQueue.size()));
-//                    }
-//                }
-//                LOG.debug("stop");
-//            }
-//        }
-//
-//
-//        sampleBuffers.get(streamingTrack).add(streamingSample);
-//        nextSampleStartTime.put(streamingTrack, nextSampleStartTime.get(streamingTrack) + streamingSample.getDuration());
     }
 
 
     protected boolean isFragmentReady(StreamingTrack streamingTrack, StreamingSample next, long targetDurationMs) {
         long ts = nextSampleStartTime.get(streamingTrack); // přiřítá
         long cfst = nextFragmentCreateStartTime.get(streamingTrack); //0
+
+        LOG.debug("isFragmentReady: ts" + ts + " left "+ ((double) targetDurationMs / 1000.0) * streamingTrack.getTimescale());
 
         if ((ts > cfst + ((double) targetDurationMs / 1000.0) * streamingTrack.getTimescale())) {
             // mininum fragment length == 3 seconds
@@ -465,25 +380,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
      * @return true if a fragment has been created.
      */
     protected boolean isFragmentReady(StreamingTrack streamingTrack, StreamingSample next) {
-        long ts = nextSampleStartTime.get(streamingTrack);
-        long cfst = nextFragmentCreateStartTime.get(streamingTrack);
-
-        if ((ts > cfst + ((double) targetDuration / 1000.0) * streamingTrack.getTimescale())) {
-            // mininum fragment length == 3 seconds
-            SampleFlagsSampleExtension sfExt = next.getSampleExtension(SampleFlagsSampleExtension.class);
-            if (sfExt == null || sfExt.isSyncSample()) {
-                //System.err.println(streamingTrack + " ready at " + ts);
-                // the next sample needs to be a sync sample
-                // when there is no SampleFlagsSampleExtension we assume syncSample == true
-                return true;
-            }
-        }
-        return false;
+        return isFragmentReady(streamingTrack, next, targetDuration);
     }
 
     protected Box[] createFragment(StreamingTrack streamingTrack, List<StreamingSample> samples) {
-       // nextFragmentCreateStartTime.get(streamingTrack);
-
         tfraOffsets.put(streamingTrack, Mp4Arrays.copyOfAndAppend(tfraOffsets.get(streamingTrack), bytesWritten));
 
         String className = streamingTrack.getClass().getSimpleName();
