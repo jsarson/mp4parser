@@ -1,5 +1,6 @@
 package org.mp4parser.streaming.output.mp4;
 
+import org.eclipse.jetty.util.log.Log;
 import org.mp4parser.Box;
 import org.mp4parser.IsoFile;
 import org.mp4parser.boxes.iso14496.part12.*;
@@ -262,7 +263,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         }
     }
 
-    private synchronized void acceptVideo(StreamingSample H264Frame, StreamingTrack videoTrack) throws IOException {
+    private void acceptVideo(StreamingSample H264Frame, StreamingTrack videoTrack) throws IOException {
         if (headerWritten && videoFragmentContainer == null && isFragmentReady(videoTrack, H264Frame)) { // video is ready FragmentContainer videoFragmentContainer = createFragmentContainer(streamingTrack);
             videoFragmentContainer = createFragmentContainer(videoTrack);
             sampleBuffers.get(videoTrack).clear();
@@ -271,16 +272,20 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             writeFragment(videoFragmentContainer.fragmentContent);
 
             nextFragmentWriteStartTime.put(videoTrack, nextFragmentCreateStartTime.get(videoTrack));
+            LOG.debug("FragmentedMp4Writer acceptVideo: " + videoFragmentContainer.duration);
+            LOG.debug("FragmentedMp4Writer acceptVideo: " + nextFragmentCreateStartTime.get(videoTrack));
+            LOG.debug("FragmentedMp4Writer acceptVideo: " + (nextFragmentCreateStartTime.get(videoTrack) + videoFragmentContainer.duration));
+
             nextFragmentCreateStartTime.put(videoTrack, nextFragmentCreateStartTime.get(videoTrack) + videoFragmentContainer.duration);
         }
     }
 
-    private synchronized void acceptAudio(StreamingSample aacAudio, StreamingTrack audioTrack) throws IOException {
+    private void acceptAudio(StreamingSample aacAudio, StreamingTrack audioTrack) throws IOException {
         StreamingTrack videoTrack = findTrackByClassName("CustomH264AnnexBTrack");
 
         double videoEnd = (double) nextFragmentCreateStartTime.get(videoTrack) / (double) videoTrack.getTimescale();
         double currentAudio = (double) nextFragmentCreateStartTime.get(audioTrack) / (double) audioTrack.getTimescale();
-        LOG.debug("nextVideo" + nextFragmentCreateStartTime.get(videoTrack).toString() + "nextAudio" + nextFragmentCreateStartTime.get(audioTrack).toString());
+
         LOG.debug("videoEnd: " + videoEnd + " currentAudio: " + currentAudio);
         long targetAudioDurationFromVideoMs = (long)((videoEnd * 1_000 - currentAudio * 1_000));
 
@@ -294,13 +299,20 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             long durationCounting = 0;
 
             for(StreamingSample sample : sampleBuffers.get(audioTrack)) {
-                if(durationCounting < targetAudioDurationFromVideoMs / 1_000 * audioTrack.getTimescale()) {
+                if(durationCounting < targetAudioDurationFromVideoMs * audioTrack.getTimescale() / 1_000) {
                     usedSamples.add(sample);
                     durationCounting += sample.getDuration();
                 } else {
+                    LOG.debug("breaking out of loop");
                     break;
                 }
             }
+            if(durationCounting < targetAudioDurationFromVideoMs * audioTrack.getTimescale() / 1_000) {
+                LOG.debug("not enough samples for audio");
+                return;
+            }
+
+
 
             LOG.debug("durationCounting: " + durationCounting * 1000.0 / audioTrack.getTimescale() + " targetAudioDurationFromVideo: " + targetAudioDurationFromVideoMs);
 
@@ -313,7 +325,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                 outputCallback.onSegmentReady(
                         videoTrack,
                         convertTimescaleDurationToMs(
-                                videoFragmentContainer.duration, videoTrack.getTimescale()
+                                durationCounting, audioTrack.getTimescale()
                         ),
                         false);
             }
@@ -341,7 +353,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         }
 
         sampleBuffers.get(streamingTrack).add(streamingSample);
-        LOG.debug("streaming sample duration:"+ streamingSample.getDuration());
+        //LOG.debug("streaming sample duration:"+ streamingSample.getDuration());
         nextSampleStartTime.put(streamingTrack, nextSampleStartTime.get(streamingTrack) + streamingSample.getDuration());
     }
 
@@ -354,10 +366,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         long ts = nextSampleStartTime.get(streamingTrack); // přiřítá
         long cfst = nextFragmentCreateStartTime.get(streamingTrack); //0
 
-        LOG.debug("isFragmentReady: ts" + ts + " left "+ ((double) targetDurationMs / 1000.0) * streamingTrack.getTimescale());
+        LOG.debug("isFragmentReady: " + "track " + streamingTrack.getClass().getSimpleName() + "     " +
+                "ts" + ts + " right "+ (cfst + ((double) targetDurationMs / 1000.0) * streamingTrack.getTimescale()));
 
         if ((ts > cfst + ((double) targetDurationMs / 1000.0) * streamingTrack.getTimescale())) {
-            // mininum fragment length == 3 seconds
             SampleFlagsSampleExtension sfExt = next.getSampleExtension(SampleFlagsSampleExtension.class);
             if (sfExt == null || sfExt.isSyncSample()) {
                 //System.err.println(streamingTrack + " ready at " + ts);
