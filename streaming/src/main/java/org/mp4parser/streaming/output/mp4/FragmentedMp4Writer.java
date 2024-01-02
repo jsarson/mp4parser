@@ -1,6 +1,5 @@
 package org.mp4parser.streaming.output.mp4;
 
-import org.eclipse.jetty.util.log.Log;
 import org.mp4parser.Box;
 import org.mp4parser.IsoFile;
 import org.mp4parser.boxes.iso14496.part12.*;
