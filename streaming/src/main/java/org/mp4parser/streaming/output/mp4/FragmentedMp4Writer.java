@@ -38,7 +38,6 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private static Logger LOG = LoggerFactory.getLogger(FragmentedMp4Writer.class.getName());
     protected final WritableByteChannel sink;
     protected List<StreamingTrack> source;
-    protected List<StreamingTrack> source;
     protected Date creationTime;
     protected long sequenceNumber = 1;
     protected Map<StreamingTrack, CountDownLatch> congestionControl = new ConcurrentHashMap<StreamingTrack, CountDownLatch>();
