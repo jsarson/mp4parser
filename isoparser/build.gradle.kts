@@ -17,8 +17,9 @@ dependencies {
     implementation("org.aspectj:aspectjtools:1.9.7")
 
     implementation("commons-io:commons-io:2.5")
-    implementation("commons-codec:commons-codec:1.10")
+    implementation("commons-codec:commons-codec:1.16.0")
     implementation("commons-lang:commons-lang:2.6")
+    testImplementation("junit:junit:4.12")
 }
 
 tasks.test {
