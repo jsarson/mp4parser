@@ -125,20 +125,23 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
      * @see MovieFragmentRandomAccessBox
      */
     public synchronized void close() throws IOException {
+        long maxDuration = 0L;
         for (StreamingTrack streamingTrack : source) {
             Box[] fragments = createFragment(streamingTrack, sampleBuffers.get(streamingTrack));
             writeFragment(fragments);
-            if(outputCallback != null) {
-                outputCallback.onSegmentReady(
-                        streamingTrack,
-                        convertTimescaleDurationToMs(
-                        nextSampleStartTime.get(streamingTrack) - nextFragmentCreateStartTime.get(streamingTrack), streamingTrack.getTimescale()
-                        ),
-                        false);
-            }
+            maxDuration = Math.max(maxDuration, convertTimescaleDurationToMs(nextSampleStartTime.get(streamingTrack) - nextFragmentCreateStartTime.get(streamingTrack), streamingTrack.getTimescale()));
             streamingTrack.close();
         }
+        if(outputCallback != null) {
+            outputCallback.onSegmentReady(
+                    source.get(0), // video track
+                    maxDuration,
+                    false, false);
+        }
         writeFooter(createFooter());
+//        if(outputCallback != null) {
+//            outputCallback.onSegmentReady(null, 0, false, true);
+//        }
     }
 
     protected void write(WritableByteChannel out, Box... boxes) throws IOException {
@@ -257,7 +260,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
                 writeHeader(createHeader());
                 headerWritten = true;
-                outputCallback.onSegmentReady(null, 0, true);
+                outputCallback.onSegmentReady(null, 0, true, false);
             }
         }
     }
@@ -326,7 +329,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                         convertTimescaleDurationToMs(
                                 durationCounting, audioTrack.getTimescale()
                         ),
-                        false);
+                        false, false);
             }
 
             if (usedSamples.size() > 0) {
