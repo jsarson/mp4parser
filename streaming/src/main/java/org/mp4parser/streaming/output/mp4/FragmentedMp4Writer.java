@@ -139,9 +139,9 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                     false, false);
         }
         writeFooter(createFooter());
-//        if(outputCallback != null) {
-//            outputCallback.onSegmentReady(null, 0, false, true);
-//        }
+        if(outputCallback != null) {
+            outputCallback.onSegmentReady(null, 0, false, true);
+        }
     }
 
     protected void write(WritableByteChannel out, Box... boxes) throws IOException {
