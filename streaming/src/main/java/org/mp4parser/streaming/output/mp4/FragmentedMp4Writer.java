@@ -29,7 +29,7 @@ import static org.mp4parser.tools.CastUtils.l2i;
  * [moof, mdat]+ and a footer [mfra].
  * The MultiTrackFragmentedMp4Writer is a passive component. It will only be active if one of the
  * source tracks pushes a sample via {@link #acceptSample(StreamingSample, StreamingTrack)}.
- * It has to bed ({@link #close()}) actively to trigger the write of remaining buffered
+ * It has to be closed ({@link #close()}) actively to trigger the write of remaining buffered
  * samples and the footer.
  */
 public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
