@@ -5,7 +5,6 @@ import org.mp4parser.boxes.iso14496.part12.*;
 import org.mp4parser.streaming.StreamingTrack;
 import org.mp4parser.streaming.extensions.DimensionTrackExtension;
 import org.mp4parser.streaming.extensions.TrackIdTrackExtension;
-import org.mp4parser.support.Matrix;
 
 import java.util.LinkedList;
 import java.util.List;
