@@ -65,7 +65,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     long bytesWritten = 0;
     volatile boolean headerWritten = false;
 
-    private long targetDuration = 3000;
+    private long targetDuration = 2000;
 
     public void setTargetDuration(long targetDuration) {
         if(targetDuration <= 0) {
@@ -268,7 +268,9 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private void acceptVideo(StreamingSample H264Frame, StreamingTrack videoTrack) throws IOException {
         if (headerWritten && videoFragmentContainer == null && isFragmentReady(videoTrack, H264Frame)) { // video is ready FragmentContainer videoFragmentContainer = createFragmentContainer(streamingTrack);
             videoFragmentContainer = createFragmentContainer(videoTrack);
+
             sampleBuffers.get(videoTrack).clear();
+
             LOG.debug("putting new start time video: " +  convertTimescaleDurationToSeconds((nextFragmentCreateStartTime.get(videoTrack) + videoFragmentContainer.duration), videoTrack.getTimescale()));
 
             writeFragment(videoFragmentContainer.fragmentContent);
@@ -346,6 +348,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private void acceptSampleCamerito(StreamingSample streamingSample, StreamingTrack streamingTrack) throws IOException {
         writeHeader(streamingTrack);
 
+
         if(streamingTrack.getClass().getSimpleName().equals("CustomH264AnnexBTrack")) {
             LOG.debug("is video");
             acceptVideo(streamingSample, streamingTrack);
@@ -356,6 +359,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
         sampleBuffers.get(streamingTrack).add(streamingSample);
         //LOG.debug("streaming sample duration:"+ streamingSample.getDuration());
+
         nextSampleStartTime.put(streamingTrack, nextSampleStartTime.get(streamingTrack) + streamingSample.getDuration());
     }
 
@@ -394,7 +398,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
      * @return true if a fragment has been created.
      */
     protected boolean isFragmentReady(StreamingTrack streamingTrack, StreamingSample next) {
-        return isFragmentReady(streamingTrack, next, targetDuration);
+        return isFragmentReady(streamingTrack, next, targetDuration - 500); // 500ms before the end - 1000 is one keyframe
     }
 
     protected Box[] createFragment(StreamingTrack streamingTrack, List<StreamingSample> samples) {
