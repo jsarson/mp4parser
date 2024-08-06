@@ -21,6 +21,8 @@ dependencies {
     implementation("commons-io:commons-io:2.5")
     implementation("commons-codec:commons-codec:1.10")
     implementation("commons-lang:commons-lang:2.6")
+
+    testImplementation("org.junit.jupiter:junit-jupiter-api:5.8.1")
 }
 
 tasks.test {
