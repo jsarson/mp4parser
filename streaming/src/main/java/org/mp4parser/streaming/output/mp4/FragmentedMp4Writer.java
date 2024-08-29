@@ -66,7 +66,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     long bytesWritten = 0;
     volatile boolean headerWritten = false;
 
-    private long targetDuration = 3000;
+    private long targetDuration = 2000;
 
     public void setTargetDuration(long targetDuration) {
         if (targetDuration <= 0) {
@@ -126,20 +126,24 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
      * @see MovieFragmentRandomAccessBox
      */
     public synchronized void close() throws IOException {
+        long maxDuration = 0L;
         for (StreamingTrack streamingTrack : source) {
             Box[] fragments = createFragment(streamingTrack, sampleBuffers.get(streamingTrack));
             writeFragment(fragments);
-            if (outputCallback != null) {
-                outputCallback.onSegmentReady(
-                        streamingTrack,
-                        convertTimescaleDurationToMs(
-                                nextSampleStartTime.get(streamingTrack) - nextFragmentCreateStartTime.get(streamingTrack), streamingTrack.getTimescale()
-                        ),
-                        false);
-            }
+            maxDuration = Math.max(maxDuration, convertTimescaleDurationToMs(nextSampleStartTime.get(streamingTrack) - nextFragmentCreateStartTime.get(streamingTrack), streamingTrack.getTimescale()));
+
             streamingTrack.close();
         }
+        if(outputCallback != null) {
+            outputCallback.onSegmentReady(
+                    source.get(0), // video track
+                    maxDuration,
+                    false, false);
+        }
         writeFooter(createFooter());
+        if(outputCallback != null) {
+            outputCallback.onSegmentReady(null, 0, false, true);
+        }
     }
 
     protected void write(WritableByteChannel out, Box... boxes) throws IOException {
@@ -258,7 +262,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
                 writeHeader(createHeader());
                 headerWritten = true;
-                outputCallback.onSegmentReady(null, 0, true);
+                outputCallback.onSegmentReady(null, 0, true, false);
             }
         }
     }
@@ -266,10 +270,12 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private void acceptVideo(StreamingSample H264Frame, StreamingTrack videoTrack) throws IOException {
         if (headerWritten && videoFragmentContainer == null && isFragmentReady(videoTrack, H264Frame)) { // video is ready FragmentContainer videoFragmentContainer = createFragmentContainer(streamingTrack);
             videoFragmentContainer = createFragmentContainer(videoTrack);
+
             sampleBuffers.get(videoTrack).clear();
             if (DEBUG) {
-                LOG.debug("acceptVideo, duration=" + convertTimescaleDurationToSeconds((nextFragmentCreateStartTime.get(videoTrack) + videoFragmentContainer.duration), videoTrack.getTimescale()));
+              LOG.debug("putting new start time video: " +  convertTimescaleDurationToSeconds((nextFragmentCreateStartTime.get(videoTrack) + videoFragmentContainer.duration), videoTrack.getTimescale()));
             }
+
 
             writeFragment(videoFragmentContainer.fragmentContent);
 
@@ -327,7 +333,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                         convertTimescaleDurationToMs(
                                 durationCounting, audioTrack.getTimescale()
                         ),
-                        false);
+                        false, false);
             }
 
             if (usedSamples.size() > 0) {
@@ -342,6 +348,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
     private void acceptSampleCamerito(StreamingSample streamingSample, StreamingTrack streamingTrack) throws IOException {
         writeHeader(streamingTrack);
+
 
         if (streamingTrack.getClass().getSimpleName().equals("CustomH264AnnexBTrack")) {
             if (DEBUG) {
@@ -359,6 +366,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         if (DEBUG) {
             LOG.debug("Sample duration=" + streamingSample.getDuration());
         }
+
         nextSampleStartTime.put(streamingTrack, nextSampleStartTime.get(streamingTrack) + streamingSample.getDuration());
     }
 
@@ -399,7 +407,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
      * @return true if a fragment has been created.
      */
     protected boolean isFragmentReady(StreamingTrack streamingTrack, StreamingSample next) {
-        return isFragmentReady(streamingTrack, next, targetDuration);
+        return isFragmentReady(streamingTrack, next, targetDuration - 500); // 500ms before the end - 1000 is one keyframe
     }
 
     protected Box[] createFragment(StreamingTrack streamingTrack, List<StreamingSample> samples) {
