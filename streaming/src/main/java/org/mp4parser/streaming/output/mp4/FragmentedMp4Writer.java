@@ -118,6 +118,24 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         return sampleBuffers.get(track).size();
     }
 
+    long debugStart = 0;
+    int debuggerTriggerMs = 30_000; // trigger logging when buffer is larger x ms
+    public DebugInterface debugger = new DebugInterface() {
+        @Override
+        public void onLongBuffer() {
+        }
+
+        @Override
+        public void putDebugLog(String message) {
+        }
+    };
+
+    public interface DebugInterface {
+        void onLongBuffer();
+
+        void putDebugLog(String message);
+    }
+
     public void setTargetDuration(long targetDuration) {
         if (targetDuration <= 0) {
             throw new IllegalStateException("target duration must be positive");
@@ -320,6 +338,15 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     }
 
     private void acceptVideo(StreamingSample H264Frame, StreamingTrack videoTrack) throws IOException {
+        var bufferDurationMs = getVideoBufferDurationMs();
+
+        // trigger fine debugging logic
+        if (bufferDurationMs > debuggerTriggerMs && debugStart == 0) {
+            debugger.onLongBuffer();
+            debugger.putDebugLog("videoBufferDuration is more than" + debuggerTriggerMs / 1000 + "s, its=" + bufferDurationMs / 1000);
+            debugStart = System.currentTimeMillis();
+        }
+
         if (DEBUG) {
             LOG.debug("acceptVideo, isFragmentReady: " + isFragmentReady(videoTrack, H264Frame) + ", isHeaderWritten: " + headerWritten + ", bufferDurationMs: " + getVideoBufferDurationMs() + ", bufferCount: " + bufferCount(videoTrack));
         }
