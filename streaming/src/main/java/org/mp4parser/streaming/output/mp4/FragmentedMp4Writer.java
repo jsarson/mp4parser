@@ -1,11 +1,38 @@
 package org.mp4parser.streaming.output.mp4;
 
+import static org.mp4parser.tools.CastUtils.l2i;
+
 import org.mp4parser.Box;
 import org.mp4parser.IsoFile;
-import org.mp4parser.boxes.iso14496.part12.*;
+import org.mp4parser.boxes.iso14496.part12.FileTypeBox;
+import org.mp4parser.boxes.iso14496.part12.MediaDataBox;
+import org.mp4parser.boxes.iso14496.part12.MediaHeaderBox;
+import org.mp4parser.boxes.iso14496.part12.MovieBox;
+import org.mp4parser.boxes.iso14496.part12.MovieExtendsBox;
+import org.mp4parser.boxes.iso14496.part12.MovieExtendsHeaderBox;
+import org.mp4parser.boxes.iso14496.part12.MovieFragmentBox;
+import org.mp4parser.boxes.iso14496.part12.MovieFragmentHeaderBox;
+import org.mp4parser.boxes.iso14496.part12.MovieFragmentRandomAccessBox;
+import org.mp4parser.boxes.iso14496.part12.MovieFragmentRandomAccessOffsetBox;
+import org.mp4parser.boxes.iso14496.part12.MovieHeaderBox;
+import org.mp4parser.boxes.iso14496.part12.ProgressiveDownloadInformationBox;
+import org.mp4parser.boxes.iso14496.part12.SampleFlags;
+import org.mp4parser.boxes.iso14496.part12.SegmentIndexBox;
+import org.mp4parser.boxes.iso14496.part12.SegmentTypeBox;
+import org.mp4parser.boxes.iso14496.part12.TrackExtendsBox;
+import org.mp4parser.boxes.iso14496.part12.TrackFragmentBaseMediaDecodeTimeBox;
+import org.mp4parser.boxes.iso14496.part12.TrackFragmentBox;
+import org.mp4parser.boxes.iso14496.part12.TrackFragmentHeaderBox;
+import org.mp4parser.boxes.iso14496.part12.TrackFragmentRandomAccessBox;
+import org.mp4parser.boxes.iso14496.part12.TrackRunBox;
 import org.mp4parser.streaming.StreamingSample;
 import org.mp4parser.streaming.StreamingTrack;
-import org.mp4parser.streaming.extensions.*;
+import org.mp4parser.streaming.extensions.CencEncryptTrackExtension;
+import org.mp4parser.streaming.extensions.CompositionTimeSampleExtension;
+import org.mp4parser.streaming.extensions.CompositionTimeTrackExtension;
+import org.mp4parser.streaming.extensions.DefaultSampleFlagsTrackExtension;
+import org.mp4parser.streaming.extensions.SampleFlagsSampleExtension;
+import org.mp4parser.streaming.extensions.TrackIdTrackExtension;
 import org.mp4parser.streaming.output.SampleSink;
 import org.mp4parser.tools.IsoTypeWriter;
 import org.mp4parser.tools.Mp4Arrays;
@@ -17,11 +44,18 @@ import java.io.IOException;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
-
-import static org.mp4parser.tools.CastUtils.l2i;
 
 
 /**
@@ -52,6 +86,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     /**
      * Contains the next sample's start time.
      */
+    // next sample is the last sample we received
     protected Map<StreamingTrack, Long> nextSampleStartTime = new HashMap<StreamingTrack, Long>();
     /**
      * Buffers the samples per track until there are enough samples to form a Segment.
@@ -67,6 +102,21 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     volatile boolean headerWritten = false;
 
     private long targetDuration = 2000;
+
+    long videoBufferDuration = 0;
+    long audioBufferDuration = 0;
+
+    public long getVideoBufferDurationMs() {
+        return (videoBufferDuration * 1000) / findTrackByClassName("CustomH264AnnexBTrack").getTimescale();
+    }
+
+    public long getAudioBufferDurationMs() {
+        return (audioBufferDuration * 1000) / findTrackByClassName("AacStreamingTrack").getTimescale();
+    }
+
+    int bufferCount(StreamingTrack track) {
+        return sampleBuffers.get(track).size();
+    }
 
     public void setTargetDuration(long targetDuration) {
         if (targetDuration <= 0) {
@@ -140,6 +190,8 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                     maxDuration,
                     false, false);
         }
+        // FIXME why are we wasting cycles?
+        // this data is thrown away, its called only when we restart the muxer but still...
         writeFooter(createFooter());
         if(outputCallback != null) {
             outputCallback.onSegmentReady(null, 0, false, true);
@@ -268,6 +320,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     }
 
     private void acceptVideo(StreamingSample H264Frame, StreamingTrack videoTrack) throws IOException {
+        if (DEBUG) {
+            LOG.debug("acceptVideo, isFragmentReady: " + isFragmentReady(videoTrack, H264Frame) + ", isHeaderWritten: " + headerWritten + ", bufferDurationMs: " + getVideoBufferDurationMs() + ", bufferCount: " + bufferCount(videoTrack));
+        }
+
         if (headerWritten && videoFragmentContainer == null && isFragmentReady(videoTrack, H264Frame)) { // video is ready FragmentContainer videoFragmentContainer = createFragmentContainer(streamingTrack);
             videoFragmentContainer = createFragmentContainer(videoTrack);
 
@@ -285,7 +341,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             }
 
             nextFragmentCreateStartTime.put(videoTrack, nextFragmentCreateStartTime.get(videoTrack) + videoFragmentContainer.duration);
+            videoBufferDuration = 0;
         }
+
+        videoBufferDuration += H264Frame.getDuration();
     }
 
     private void acceptAudio(StreamingSample aacAudio, StreamingTrack audioTrack) throws IOException {
@@ -294,10 +353,13 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         double videoEnd = (double) nextFragmentCreateStartTime.get(videoTrack) / (double) videoTrack.getTimescale();
         double currentAudio = (double) nextFragmentCreateStartTime.get(audioTrack) / (double) audioTrack.getTimescale();
 
-        if (DEBUG) {
-            LOG.debug("acceptAudio, videoEnd: " + videoEnd + ", currentAudio: " + currentAudio);
-        }
         long targetAudioDurationFromVideoMs = (long) ((videoEnd * 1_000 - currentAudio * 1_000));
+
+        audioBufferDuration += aacAudio.getDuration();
+
+        if (DEBUG) {
+            LOG.debug("acceptAudio fragmentReady: " + isFragmentReady(audioTrack, aacAudio, targetAudioDurationFromVideoMs) + ", bufferDurationMs: " + getAudioBufferDurationMs() + ", bufferCount: " + bufferCount(audioTrack));
+        }
 
         if (videoFragmentContainer != null && isFragmentReady(audioTrack, aacAudio, targetAudioDurationFromVideoMs)) {
             FragmentContainer fragmentContainer = new FragmentContainer();
@@ -324,6 +386,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
             fragmentContainer.fragmentContent = createFragment(audioTrack, usedSamples);
             fragmentContainer.duration = durationCounting;
+            audioBufferDuration -= durationCounting;
 
             writeFragment(fragmentContainer.fragmentContent);
 
@@ -376,18 +439,19 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
 
     protected boolean isFragmentReady(StreamingTrack streamingTrack, StreamingSample next, long targetDurationMs) {
-        long ts = nextSampleStartTime.get(streamingTrack); // přiřítá
-        long cfst = nextFragmentCreateStartTime.get(streamingTrack); //0
+        long nextSample = nextSampleStartTime.get(streamingTrack);
+        long nextFragmentTime = nextFragmentCreateStartTime.get(streamingTrack);
+
+        double right = nextFragmentTime + ((double) targetDurationMs / 1000.0) * streamingTrack.getTimescale();
 
         if (DEBUG) {
-            LOG.debug("isFragmentReady: " + "track " + streamingTrack.getClass().getSimpleName() + "     " +
-                    "ts" + ts + " right " + (cfst + ((double) targetDurationMs / 1000.0) * streamingTrack.getTimescale()));
+            LOG.debug("isFragmentReady track: " + streamingTrack.getClass().getSimpleName() + ", scale: " + streamingTrack.getTimescale() + ", nextSample: " + nextSample + ", right: " + right);
         }
 
-        if ((ts > cfst + ((double) targetDurationMs / 1000.0) * streamingTrack.getTimescale())) {
+        if (nextSample > right) {
             SampleFlagsSampleExtension sfExt = next.getSampleExtension(SampleFlagsSampleExtension.class);
             if (sfExt == null || sfExt.isSyncSample()) {
-                //System.err.println(streamingTrack + " ready at " + ts);
+                //System.err.println(streamingTrack + " ready at " + nextSample);
                 // the next sample needs to be a sync sample
                 // when there is no SampleFlagsSampleExtension we assume syncSample == true
                 return true;
