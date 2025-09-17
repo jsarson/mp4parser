@@ -50,6 +50,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Audio is cut to match the same duration.
  *
  * Extended to mimic iOS approach: includes sgpd/sbgp boxes for RAP (video) and roll (audio).
+ * Fixed drift: use integer LCM-tick alignment with error feedback (no ms rounding).
  */
 public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private static final Logger LOG = LoggerFactory.getLogger(FragmentedMp4Writer.class.getName());
@@ -68,6 +69,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     protected final Map<StreamingTrack, Long> nextSampleStartTs = new ConcurrentHashMap<>();
 
     private WriterOutputCallback outputCallback;
+
+    // LCM-based alignment accumulator to eliminate long-term drift (in LCM ticks)
+    private long lcmTimescale = 0;
+    private long audioSyncErrLcm = 0; // carried between fragments to decide 93/94 AAC frames, etc.
 
     public FragmentedMp4Writer(List<StreamingTrack> source, WritableByteChannel sink) throws IOException {
         this.source = new LinkedList<>(source);
@@ -208,6 +213,11 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         List<StreamingSample> aBuf = sampleBuffers.get(a);
         if (vBuf.isEmpty() || aBuf.isEmpty()) return;
 
+        // compute/update LCM timescale for stable integer math
+        long lcm = Mp4Math.lcm(new long[]{v.getTimescale(), a.getTimescale()});
+        if (lcmTimescale == 0) lcmTimescale = lcm;
+
+        // find first two keyframes in vBuf
         int firstKey = -1, secondKey = -1;
         for (int i = 0; i < vBuf.size(); i++) {
             if (isKeyframeSample(vBuf.get(i))) {
@@ -223,25 +233,40 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             secondKey = vBuf.size();
         }
 
+        // select video samples up to (but not including) second keyframe
         List<StreamingSample> vSel = new ArrayList<>(vBuf.subList(firstKey, secondKey));
         if (vSel.isEmpty()) return;
 
+        // exact video duration in ticks and in LCM ticks
         long vDur = sumDur(vSel);
+        long vDurLcm = scaleTo(vDur, v.getTimescale(), lcm);
+
+        // === Select AUDIO to match VIDEO in LCM ticks using error feedback (Bresenham-like) ===
+        long desiredAudioTotalLcm = vDurLcm + audioSyncErrLcm;
         List<StreamingSample> aSel = new ArrayList<>();
-        long aAcc = 0;
-        for (int i = 0; i < aBuf.size(); i++) {
-            StreamingSample s = aBuf.get(i);
-            if (aAcc + s.getDuration() > scaleTs(vDur, v.getTimescale(), a.getTimescale())) break;
-            aSel.add(s);
-            aAcc += s.getDuration();
+        long aAccLcm = 0;
+        int aIdx = 0;
+        while (aIdx < aBuf.size()) {
+            StreamingSample s = aBuf.get(aIdx);
+            long sLcm = scaleTo(s.getDuration(), a.getTimescale(), lcm);
+            if (aAccLcm + sLcm <= desiredAudioTotalLcm) {
+                aSel.add(s);
+                aAccLcm += sLcm;
+                aIdx++;
+            } else {
+                break; // adding next sample would overshoot desired total
+            }
         }
         if (aSel.isEmpty()) return;
+
+        // update error accumulator so cumulative audio == cumulative video over time
+        audioSyncErrLcm = desiredAudioTotalLcm - aAccLcm; // bounded by < one audio sample in LCM ticks
 
         long vBase = nextFragmentStartTs.get(v);
         long aBase = nextFragmentStartTs.get(a);
 
-        System.out.println("audio time base: " + aBase + " | video time base: " + vBase + " | diff: " + (aBase - vBase));
-        System.out.println("audio buffer: " + aBuf.size() + " | video buffer: " + vBuf.size());
+        System.out.println("audio base: " + aBase + ", video base: " + vBase + ", diff: " + (aBase - vBase));
+        System.out.println("audio buffer: " + aBuf.size() + ", video buffer: " + vBuf.size() + ", diff: " + (aBuf.size() - vBuf.size()));
 
         MovieFragmentBox moof = new MovieFragmentBox();
         MovieFragmentHeaderBox mfhd = new MovieFragmentHeaderBox();
@@ -407,6 +432,12 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
     private long toMs(long ts, long timescale) {
         return (long) ((ts * 1000.0) / timescale);
+    }
+
+    // Integer scaling helper: convert timestamp from fromScale to toScale using floor (no rounding up)
+    private long scaleTo(long ts, long fromScale, long toScale) {
+        if (fromScale == toScale) return ts;
+        return (ts * toScale) / fromScale; // floor to ensure audio never runs ahead of video
     }
 
     private long scaleTs(long ts, long fromScale, long toScale) {
