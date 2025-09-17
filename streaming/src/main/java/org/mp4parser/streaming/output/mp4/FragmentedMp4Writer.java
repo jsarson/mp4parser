@@ -43,11 +43,13 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Fragmented MP4 writer (seek-safe for iOS, close to original style).
- * - Jeden fragment = jedno moof (traf video + traf audio) + jeden mdat.
- * - Každý traf má tfdt (baseMediaDecodeTime) = DTS prvního sample ve fragmentu daného tracku.
- * - Každý trun má správný data_offset (počítá se po spočtení velikosti moof).
- * - Bez B-frames (DTS == PTS) => žádné composition time offsety.
- * - Fragment začíná na posledním dostupném video IDR.
+ * Diagnostic version: **NO DROPPING** of pre-keyframe samples.
+ *
+ * \- One fragment = one moof (traf video + traf audio) + one mdat.
+ * \- Each traf has tfdt (baseMediaDecodeTime) = DTS of the first sample included in that fragment.
+ * \- Each trun has correct data_offset (computed after moof size).
+ * \- No B-frames (DTS == PTS) => no composition time offsets.
+ * \- This build DOES NOT trim to the last IDR. We flush from buffer start.
  */
 public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private static final Logger LOG = LoggerFactory.getLogger(FragmentedMp4Writer.class.getName());
@@ -60,14 +62,14 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     protected long bytesWritten = 0;
     protected long sequenceNumber = 1;
 
-    private long targetDurationMs = 2000; // cílová délka fragmentu v ms
+    private long targetDurationMs = 2000; // target fragment duration in ms
 
-    // Buffery a časování
+    // Buffers & timing
     protected final Map<StreamingTrack, List<StreamingSample>> sampleBuffers = new HashMap<StreamingTrack, List<StreamingSample>>();
-    protected final Map<StreamingTrack, Long> nextFragmentStartTs = new ConcurrentHashMap<StreamingTrack, Long>(); // v timescale tracku
-    protected final Map<StreamingTrack, Long> nextSampleStartTs = new ConcurrentHashMap<StreamingTrack, Long>(); // v timescale tracku
+    protected final Map<StreamingTrack, Long> nextFragmentStartTs = new ConcurrentHashMap<StreamingTrack, Long>(); // per-track timescale
+    protected final Map<StreamingTrack, Long> nextSampleStartTs = new ConcurrentHashMap<StreamingTrack, Long>(); // per-track timescale
 
-    // volitelný callback – pokud ho ve vaší codebase máte
+    // optional callback – if present in your codebase
     private WriterOutputCallback outputCallback;
 
     public void setOutputCallback(WriterOutputCallback cb) {
@@ -84,7 +86,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         this.sink = sink;
         this.creationTime = new Date();
 
-        // Nastav trackId a základní struktury
+        // Init trackId and basic structures
         HashSet<Long> ids = new HashSet<Long>();
         for (StreamingTrack t : source) {
             t.setSampleSink(this);
@@ -120,7 +122,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
     @Override
     public synchronized void close() throws IOException {
-        maybeFlushFragment(true); // force flush posledního fragmentu
+        maybeFlushFragment(true); // force flush last fragment
         writeFooter(createFooter());
         if (outputCallback != null) outputCallback.onSegmentReady(null, 0, false, true);
     }
@@ -149,7 +151,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private synchronized void writeHeaderIfReady(StreamingTrack triggering) throws IOException {
         if (headerWritten) return;
 
-        // podmínka: od KAŽDÉ stopy máme aspoň JEDEN sample v bufferu
+        // condition: from EVERY track we have at least ONE sample in buffer
         boolean allHaveAtLeastOne = true;
         for (StreamingTrack t : source) {
             List<StreamingSample> buf = sampleBuffers.get(t);
@@ -214,7 +216,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         return mvhd;
     }
 
-    // DefaultBoxes vyžaduje tento override
+    // DefaultBoxes requires this override
     protected Box createMdhd(StreamingTrack t) {
         MediaHeaderBox mdhd = new MediaHeaderBox();
         mdhd.setCreationTime(creationTime);
@@ -225,7 +227,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         return mdhd;
     }
 
-    // ===== Fragmentování (společný fragment pro video+audio) =====
+    // ===== Fragmenting (single fragment for video+audio); NO DROPPING =====
 
     private synchronized void maybeFlushFragment(boolean force) throws IOException {
         StreamingTrack v = findVideoTrack();
@@ -243,83 +245,43 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         long vNow = nextSampleStartTs.get(v);
         long aNow = nextSampleStartTs.get(a);
 
-        // 1) najdi POSLEDNÍ IDR ve video bufferu
-        int lastK = lastKeyframeIndex(vBuf);
-        if (lastK < 0) {
-            if (!force) return;
-            lastK = 0;
-        }
+        long vBufferedMs = toMs(Math.max(0, vNow - vStart), v.getTimescale());
+        long aBufferedMs = toMs(Math.max(0, aNow - aStart), a.getTimescale());
 
-        // kolik času máme od posledního IDR po konec bufferu?
-        long vSinceK = sumDur(vBuf, lastK, vBuf.size());     // v timescale videa
-        long vSinceKms = toMs(vSinceK, v.getTimescale());
-        long aDurMs = toMs(aNow - aStart, a.getTimescale());
-
-        boolean timeEnough = Math.min(vSinceKms, aDurMs) >= targetDurationMs;
+        boolean timeEnough = Math.min(vBufferedMs, aBufferedMs) >= targetDurationMs;
         if (!(force || timeEnough)) return;
 
-// 2) decide "how much" to cut in *track timescales*, not ms
-//    We'll first pick VIDEO, then match AUDIO duration to the exact picked video ticks.
-        long targetVideoTicks = Math.max(1, (targetDurationMs * v.getTimescale()) / 1000);
+        long cutMs = force ? Math.min(vBufferedMs, aBufferedMs) : targetDurationMs;
 
-// 3) select VIDEO samples starting at lastK up to targetVideoTicks (or all if force)
+        // Select VIDEO from the beginning of the buffer
         List<StreamingSample> vSel = new ArrayList<>();
-        long vAccTs = 0;
-        for (int i = lastK; i < vBuf.size(); i++) {
+        long vAcc = 0;
+        for (int i = 0; i < vBuf.size(); i++) {
             StreamingSample s = vBuf.get(i);
-            long after = vAccTs + s.getDuration();
-            if (!force && after > targetVideoTicks) break;
+            long after = vAcc + s.getDuration();
+            if (!force && toMs(after, v.getTimescale()) > cutMs) break;
             vSel.add(s);
-            vAccTs = after;
+            vAcc = after;
         }
         if (vSel.isEmpty()) return;
 
-// 4) align AUDIO start to the DTS of the first selected VIDEO sample,
-//    then select AUDIO to match the exact picked VIDEO duration (scaled).
-        long vDropTsVideoScale = sumDur(vBuf, 0, lastK); // ticks in video timescale to reach first selected video sample
-        long aDropTs = scaleTs(vDropTsVideoScale, v.getTimescale(), a.getTimescale());
-
-// Drop audio strictly until its accumulated duration reaches/exceeds aDropTs,
-// so audio doesn't start *before* the chosen video base.
-        int aStartIdx = 0;
-        long aAccDrop = 0;
-        while (aStartIdx < aBuf.size() && aAccDrop < aDropTs) {
-            long next = aAccDrop + aBuf.get(aStartIdx).getDuration();
-            if (next <= aDropTs) {
-                aAccDrop = next;
-                aStartIdx++;
-            } else {
-                // we are in the middle of an audio sample; drop it so audio starts at/after video base
-                aAccDrop = next;
-                aStartIdx++;
-                break;
-            }
-        }
-
-// Now match AUDIO duration to the actual picked VIDEO span:
-        long aTargetTicks = scaleTs(vAccTs, v.getTimescale(), a.getTimescale());
-
+        // Select AUDIO from the beginning of the buffer
         List<StreamingSample> aSel = new ArrayList<>();
-        long aAccTs = 0;
-        for (int i = aStartIdx; i < aBuf.size(); i++) {
+        long aAcc = 0;
+        for (int i = 0; i < aBuf.size(); i++) {
             StreamingSample s = aBuf.get(i);
-            long after = aAccTs + s.getDuration();
-            if (!force && after > aTargetTicks) break;
+            long after = aAcc + s.getDuration();
+            if (!force && toMs(after, a.getTimescale()) > cutMs) break;
             aSel.add(s);
-            aAccTs = after;
+            aAcc = after;
         }
         if (aSel.isEmpty()) return;
 
-// 5) baseMediaDecodeTime for both tracks:
-// BEFORE (buggy):
-// long vBase = vStart + vDropTsVideoScale;
-// long aBase = aStart + aAccDrop;
-
-// AFTER (fixed): don't count what you didn't write
+        // baseMediaDecodeTime for both tracks: DO NOT add any drop; we don't drop here anyway
         long vBase = vStart;
         long aBase = aStart;
 
-// 6) build moof + truns (unchanged)
+        // build moof (2×traf) and compute data_offset in truns
         MovieFragmentBox moof = new MovieFragmentBox();
         MovieFragmentHeaderBox mfhd = new MovieFragmentHeaderBox();
         mfhd.setSequenceNumber(sequenceNumber);
@@ -335,36 +297,28 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         int firstPayloadOffset = (int) (8 + moofSize); // 8 = mdat header
         long vBytes = sumBytes(vSel);
 
-        if (!truns.isEmpty()) truns.get(0).setDataOffset(firstPayloadOffset);
-        if (truns.size() > 1) truns.get(1).setDataOffset((int) (firstPayloadOffset + vBytes));
+        if (!truns.isEmpty()) truns.get(0).setDataOffset(firstPayloadOffset);                   // video trun
+        if (truns.size() > 1) truns.get(1).setDataOffset((int) (firstPayloadOffset + vBytes)); // audio trun
 
-// 7) write mdat and moof (unchanged)
+        // mdat and write
         Box mdat = createMdat(vSel, aSel);
         writeFragment(moof, mdat);
         sequenceNumber++;
 
-// 8) advance per track using only what we actually wrote
+        // advance per track by the durations actually written
         long vUsed = sumDur(vSel);
         long aUsed = sumDur(aSel);
-
-// BEFORE (buggy):
-// nextFragmentStartTs.put(v, vBase + vUsed);
-// nextFragmentStartTs.put(a, aBase + aUsed);
-
-// AFTER (fixed): base is already the current track time (vStart/aStart)
         nextFragmentStartTs.put(v, vStart + vUsed);
         nextFragmentStartTs.put(a, aStart + aUsed);
 
-
-// 9) evict consumed from buffers (these include the pre-keyframe drops)
-        int vConsume = lastK + vSel.size();
+        // evict consumed from buffers
+        int vConsume = vSel.size();
         if (vConsume > 0 && vConsume <= vBuf.size()) vBuf.subList(0, vConsume).clear();
 
-        int aConsume = aStartIdx + aSel.size();
+        int aConsume = aSel.size();
         if (aConsume > 0 && aConsume <= aBuf.size()) aBuf.subList(0, aConsume).clear();
 
-
-// 10) callback: compute duration from exact ticks to avoid ms rounding
+        // callback duration from exact ticks
         if (outputCallback != null) {
             long durMs = Math.min((vUsed * 1000) / v.getTimescale(), (aUsed * 1000) / a.getTimescale());
             outputCallback.onSegmentReady(v, durMs, false, false);
@@ -411,10 +365,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         trun.setSampleDurationPresent(true);
         trun.setSampleSizePresent(true);
         trun.setSampleCompositionTimeOffsetPresent(false); // no B-frames
-        trun.setSampleFlagsPresent(true);
-        trun.setDataOffsetPresent(true); // <-- REQUIRED
+        trun.setSampleFlagsPresent(true); // per-sample flags
+        trun.setDataOffsetPresent(true);  // IMPORTANT: data_offset is present when we set it later
 
-        List<TrackRunBox.Entry> entries = new ArrayList<>(samples.size());
+        List<TrackRunBox.Entry> entries = new ArrayList<TrackRunBox.Entry>(samples.size());
         for (StreamingSample s : samples) {
             TrackRunBox.Entry e = new TrackRunBox.Entry();
             e.setSampleSize(s.getContent().limit());
@@ -426,7 +380,6 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         parent.addBox(trun);
     }
 
-
     private SampleFlags buildFlags(boolean key) {
         SampleFlags f = new SampleFlags();
         f.setSampleDependsOn(key ? 2 : 1);   // 2 = does not depend on others; 1 = depends on others
@@ -436,14 +389,8 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
     private Box createMdat(final List<StreamingSample> v, final List<StreamingSample> a) {
         return new Box() {
-            public String getType() {
-                return "mdat";
-            }
-
-            public long getSize() {
-                return 8 + sumBytes(v) + sumBytes(a);
-            }
-
+            public String getType() { return "mdat"; }
+            public long getSize() { return 8 + sumBytes(v) + sumBytes(a); }
             public void getBox(WritableByteChannel ch) throws IOException {
                 long sz = getSize();
                 ByteBuffer bb = ByteBuffer.allocate(8);
@@ -453,13 +400,11 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                 for (StreamingSample s : v) ch.write((ByteBuffer) ((Buffer) s.getContent()).rewind());
                 for (StreamingSample s : a) ch.write((ByteBuffer) ((Buffer) s.getContent()).rewind());
             }
-        };
-    }
+        }; }
 
     // ===== Footer (optional) =====
-    protected Box[] createFooter() {
-        return new Box[0];
-    }
+    protected Box[] createFooter() { return new Box[0]; }
+
     // ===== Helpers =====
 
     private StreamingTrack findVideoTrack() {
@@ -470,30 +415,6 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         return null;
     }
 
-    private List<StreamingSample> takeUntilMs(List<StreamingSample> src, long timescale, long startTsIgnored, long targetMs, boolean includeLastIfKeyframe) {
-        // Akumuluj vzorky, dokud nepřekročíme targetMs; pokud includeLastIfKeyframe=true, přidej ještě aktuální sample, pokud je klíčový
-        List<StreamingSample> out = new ArrayList<StreamingSample>();
-        long acc = 0;
-        for (int i = 0; i < src.size(); i++) {
-            StreamingSample s = src.get(i);
-            long after = acc + s.getDuration();
-            long afterMs = toMs(after, timescale);
-            if (afterMs > targetMs) {
-                if (includeLastIfKeyframe) {
-                    SampleFlagsSampleExtension f = s.getSampleExtension(SampleFlagsSampleExtension.class);
-                    if (f == null || f.isSyncSample()) {
-                        out.add(s);
-                        acc = after;
-                    }
-                }
-                break;
-            }
-            out.add(s);
-            acc = after;
-        }
-        return out;
-    }
-
     private StreamingTrack findAudioTrack() {
         for (StreamingTrack t : source) {
             String n = t.getClass().getSimpleName().toLowerCase(Locale.ROOT);
@@ -502,47 +423,9 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         return null;
     }
 
-    private boolean lastIsKeyframe(List<StreamingSample> list) {
-        return !list.isEmpty() && isKeyframeSample(list.get(list.size() - 1));
-    }
-
-    private int lastKeyframeIndex(List<StreamingSample> samples) {
-        int idx = -1;
-        for (int i = 0; i < samples.size(); i++) {
-            if (isKeyframeSample(samples.get(i))) idx = i;
-        }
-        return idx;
-    }
-
-    private List<StreamingSample> slice(List<StreamingSample> in, int from) {
-        if (from <= 0) return new ArrayList<StreamingSample>(in);
-        List<StreamingSample> out = new ArrayList<StreamingSample>(in.size() - from);
-        for (int i = from; i < in.size(); i++) out.add(in.get(i));
-        return out;
-    }
-
-    private List<StreamingSample> dropAudioUntil(List<StreamingSample> all, long dropTs) {
-        long acc = 0;
-        int idx = 0;
-        while (idx < all.size()) {
-            long next = acc + all.get(idx).getDuration();
-            if (next <= dropTs) {
-                acc = next;
-                idx++;
-            } else break;
-        }
-        return slice(all, idx);
-    }
-
     private long sumDur(List<StreamingSample> list) {
         long d = 0;
         for (StreamingSample s : list) d += s.getDuration();
-        return d;
-    }
-
-    private long sumDur(List<StreamingSample> list, int fromIncl, int toExcl) {
-        long d = 0;
-        for (int i = fromIncl; i < toExcl && i < list.size(); i++) d += list.get(i).getDuration();
         return d;
     }
 
