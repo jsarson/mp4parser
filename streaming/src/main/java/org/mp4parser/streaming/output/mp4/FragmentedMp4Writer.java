@@ -15,6 +15,8 @@ import org.mp4parser.boxes.iso14496.part12.TrackFragmentBaseMediaDecodeTimeBox;
 import org.mp4parser.boxes.iso14496.part12.TrackFragmentBox;
 import org.mp4parser.boxes.iso14496.part12.TrackFragmentHeaderBox;
 import org.mp4parser.boxes.iso14496.part12.TrackRunBox;
+import org.mp4parser.boxes.samplegrouping.SampleGroupDescriptionBox;
+import org.mp4parser.boxes.samplegrouping.SampleToGroupBox;
 import org.mp4parser.streaming.StreamingSample;
 import org.mp4parser.streaming.StreamingTrack;
 import org.mp4parser.streaming.extensions.DefaultSampleFlagsTrackExtension;
@@ -32,6 +34,7 @@ import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -45,6 +48,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * Fragmented MP4 writer.
  * Logic: Wait until 2 keyframes in video buffer, then cut everything up to (but excluding) the 2nd keyframe.
  * Audio is cut to match the same duration.
+ *
+ * Extended to mimic iOS approach: includes sgpd/sbgp boxes for RAP (video) and roll (audio).
  */
 public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private static final Logger LOG = LoggerFactory.getLogger(FragmentedMp4Writer.class.getName());
@@ -203,7 +208,6 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         List<StreamingSample> aBuf = sampleBuffers.get(a);
         if (vBuf.isEmpty() || aBuf.isEmpty()) return;
 
-        // find first two keyframes in vBuf
         int firstKey = -1, secondKey = -1;
         for (int i = 0; i < vBuf.size(); i++) {
             if (isKeyframeSample(vBuf.get(i))) {
@@ -215,20 +219,14 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             }
         }
         if (firstKey == -1 || secondKey == -1) {
-            if (!force) return; // not enough keyframes
+            if (!force) return;
             secondKey = vBuf.size();
         }
 
-        // select video samples up to (but not including) second keyframe
         List<StreamingSample> vSel = new ArrayList<>(vBuf.subList(firstKey, secondKey));
         if (vSel.isEmpty()) return;
-        var isKeyFrame = isKeyframeSample(vSel.get(0));
-        System.out.println("creating segment is keyframe?: " + isKeyFrame);
 
-        // duration covered by video selection
         long vDur = sumDur(vSel);
-
-        // select audio to match duration
         List<StreamingSample> aSel = new ArrayList<>();
         long aAcc = 0;
         for (int i = 0; i < aBuf.size(); i++) {
@@ -242,13 +240,16 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         long vBase = nextFragmentStartTs.get(v);
         long aBase = nextFragmentStartTs.get(a);
 
+        System.out.println("audio time base: " + aBase + " | video time base: " + vBase + " | diff: " + (aBase - vBase));
+        System.out.println("audio buffer: " + aBuf.size() + " | video buffer: " + vBuf.size());
+
         MovieFragmentBox moof = new MovieFragmentBox();
         MovieFragmentHeaderBox mfhd = new MovieFragmentHeaderBox();
         mfhd.setSequenceNumber(sequenceNumber);
         moof.addBox(mfhd);
 
-        createTraf(v, moof, vSel, vBase);
-        createTraf(a, moof, aSel, aBase);
+        createTrafWithGroups(v, moof, vSel, vBase, true);
+        createTrafWithGroups(a, moof, aSel, aBase, false);
 
         List<TrackRunBox> truns = moof.getTrackRunBoxes();
         for (TrackRunBox tr : truns) tr.setDataOffset(1);
@@ -278,11 +279,31 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         }
     }
 
-    private void createTraf(StreamingTrack track, MovieFragmentBox moof, List<StreamingSample> samples, long baseTs) {
+    private void createTrafWithGroups(StreamingTrack track, MovieFragmentBox moof, List<StreamingSample> samples, long baseTs, boolean isVideo) {
         TrackFragmentBox traf = new TrackFragmentBox();
         moof.addBox(traf);
         createTfhd(track, traf);
         createTfdt(track, traf, baseTs);
+
+        // add RAP sample group for video or ROLL for audio
+        if (isVideo) {
+            SampleGroupDescriptionBox sgpd = new SampleGroupDescriptionBox();
+            sgpd.setGroupingType("rap ");
+            SampleToGroupBox sbgp = new SampleToGroupBox();
+            sbgp.setGroupingType("rap ");
+            sbgp.setEntries(Collections.singletonList(new SampleToGroupBox.Entry(samples.size(), 1)));
+            traf.addBox(sgpd);
+            traf.addBox(sbgp);
+        } else {
+            SampleGroupDescriptionBox sgpd = new SampleGroupDescriptionBox();
+            sgpd.setGroupingType("roll");
+            SampleToGroupBox sbgp = new SampleToGroupBox();
+            sbgp.setGroupingType("roll");
+            sbgp.setEntries(Collections.singletonList(new SampleToGroupBox.Entry(samples.size(), 1)));
+            traf.addBox(sgpd);
+            traf.addBox(sbgp);
+        }
+
         createTrun(track, traf, samples);
     }
 
