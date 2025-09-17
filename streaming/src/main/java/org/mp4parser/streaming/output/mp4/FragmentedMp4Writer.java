@@ -258,52 +258,68 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         boolean timeEnough = Math.min(vSinceKms, aDurMs) >= targetDurationMs;
         if (!(force || timeEnough)) return;
 
-        // 2) cílové okno (ms) – kolik zhruba chceme "od posledního IDR"
-        long cutMs = force ? Math.min(vSinceKms, aDurMs) : targetDurationMs;
+// 2) decide "how much" to cut in *track timescales*, not ms
+//    We'll first pick VIDEO, then match AUDIO duration to the exact picked video ticks.
+        long targetVideoTicks = Math.max(1, (targetDurationMs * v.getTimescale()) / 1000);
 
-        // 3) vyber VIDEO: od lastK akumuluj, dokud nepřekročíš cutMs
+// 3) select VIDEO samples starting at lastK up to targetVideoTicks (or all if force)
         List<StreamingSample> vSel = new ArrayList<>();
-        long vAcc = 0;
+        long vAccTs = 0;
         for (int i = lastK; i < vBuf.size(); i++) {
             StreamingSample s = vBuf.get(i);
-            long after = vAcc + s.getDuration();
-            if (toMs(after, v.getTimescale()) > cutMs) break;
+            long after = vAccTs + s.getDuration();
+            if (!force && after > targetVideoTicks) break;
             vSel.add(s);
-            vAcc = after;
+            vAccTs = after;
         }
         if (vSel.isEmpty()) return;
 
-        // 4) vyber AUDIO: nejdřív zahodíme vše před DTS prvního vybraného videa,
-        //    pak akumulujeme, dokud nedosáhneme stejného časového okna
-        long vDropTsVideoScale = sumDur(vBuf, 0, lastK); // DTS posun na první vzorek vSel (video timescale)
+// 4) align AUDIO start to the DTS of the first selected VIDEO sample,
+//    then select AUDIO to match the exact picked VIDEO duration (scaled).
+        long vDropTsVideoScale = sumDur(vBuf, 0, lastK); // ticks in video timescale to reach first selected video sample
         long aDropTs = scaleTs(vDropTsVideoScale, v.getTimescale(), a.getTimescale());
 
+// Drop audio strictly until its accumulated duration reaches/exceeds aDropTs,
+// so audio doesn't start *before* the chosen video base.
         int aStartIdx = 0;
         long aAccDrop = 0;
-        while (aStartIdx < aBuf.size()) {
+        while (aStartIdx < aBuf.size() && aAccDrop < aDropTs) {
             long next = aAccDrop + aBuf.get(aStartIdx).getDuration();
             if (next <= aDropTs) {
                 aAccDrop = next;
                 aStartIdx++;
-            } else break;
+            } else {
+                // we are in the middle of an audio sample; drop it so audio starts at/after video base
+                aAccDrop = next;
+                aStartIdx++;
+                break;
+            }
         }
 
+// Now match AUDIO duration to the actual picked VIDEO span:
+        long aTargetTicks = scaleTs(vAccTs, v.getTimescale(), a.getTimescale());
+
         List<StreamingSample> aSel = new ArrayList<>();
-        long aAcc = 0;
+        long aAccTs = 0;
         for (int i = aStartIdx; i < aBuf.size(); i++) {
             StreamingSample s = aBuf.get(i);
-            long after = aAcc + s.getDuration();
-            if (toMs(after, a.getTimescale()) > cutMs) break;
+            long after = aAccTs + s.getDuration();
+            if (!force && after > aTargetTicks) break;
             aSel.add(s);
-            aAcc = after;
+            aAccTs = after;
         }
         if (aSel.isEmpty()) return;
 
-        // 5) baseMediaDecodeTime pro oba trakty:
-        long vBase = vStart + vDropTsVideoScale;                      // video začíná na lastK
-        long aBase = aStart + aAccDrop;                               // audio po odřezání
+// 5) baseMediaDecodeTime for both tracks:
+// BEFORE (buggy):
+// long vBase = vStart + vDropTsVideoScale;
+// long aBase = aStart + aAccDrop;
 
-        // 6) postav moof (2×traf) a dopočítej data_offsety pro truny
+// AFTER (fixed): don't count what you didn't write
+        long vBase = vStart;
+        long aBase = aStart;
+
+// 6) build moof + truns (unchanged)
         MovieFragmentBox moof = new MovieFragmentBox();
         MovieFragmentHeaderBox mfhd = new MovieFragmentHeaderBox();
         mfhd.setSequenceNumber(sequenceNumber);
@@ -313,38 +329,44 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         createTraf(a, moof, aSel, aBase);
 
         List<TrackRunBox> truns = moof.getTrackRunBoxes();
-        for (TrackRunBox tr : truns) tr.setDataOffset(1); // dočasně
+        for (TrackRunBox tr : truns) tr.setDataOffset(1); // temporary
 
         long moofSize = moof.getSize();
         int firstPayloadOffset = (int) (8 + moofSize); // 8 = mdat header
         long vBytes = sumBytes(vSel);
 
-        if (!truns.isEmpty()) truns.get(0).setDataOffset(firstPayloadOffset);                   // video trun
-        if (truns.size() > 1) truns.get(1).setDataOffset((int) (firstPayloadOffset + vBytes)); // audio trun
+        if (!truns.isEmpty()) truns.get(0).setDataOffset(firstPayloadOffset);
+        if (truns.size() > 1) truns.get(1).setDataOffset((int) (firstPayloadOffset + vBytes));
 
-        // 7) mdat a zápis
+// 7) write mdat and moof (unchanged)
         Box mdat = createMdat(vSel, aSel);
         writeFragment(moof, mdat);
         sequenceNumber++;
 
-        // 8) posuň nextFragmentStartTs o použité durace (per track)
+// 8) advance per track using only what we actually wrote
         long vUsed = sumDur(vSel);
         long aUsed = sumDur(aSel);
-        nextFragmentStartTs.put(v, vBase + vUsed);
-        nextFragmentStartTs.put(a, aBase + aUsed);
 
-        // 9) vyházej z bufferů to, co jsme spotřebovali:
-        //    video: všechno do (lastK + vSel.size())
+// BEFORE (buggy):
+// nextFragmentStartTs.put(v, vBase + vUsed);
+// nextFragmentStartTs.put(a, aBase + aUsed);
+
+// AFTER (fixed): base is already the current track time (vStart/aStart)
+        nextFragmentStartTs.put(v, vStart + vUsed);
+        nextFragmentStartTs.put(a, aStart + aUsed);
+
+
+// 9) evict consumed from buffers (these include the pre-keyframe drops)
         int vConsume = lastK + vSel.size();
         if (vConsume > 0 && vConsume <= vBuf.size()) vBuf.subList(0, vConsume).clear();
 
-        //    audio: všechno do (aStartIdx + aSel.size())
         int aConsume = aStartIdx + aSel.size();
         if (aConsume > 0 && aConsume <= aBuf.size()) aBuf.subList(0, aConsume).clear();
 
-        // 10) callback
+
+// 10) callback: compute duration from exact ticks to avoid ms rounding
         if (outputCallback != null) {
-            long durMs = Math.min(toMs(vUsed, v.getTimescale()), toMs(aUsed, a.getTimescale()));
+            long durMs = Math.min((vUsed * 1000) / v.getTimescale(), (aUsed * 1000) / a.getTimescale());
             outputCallback.onSegmentReady(v, durMs, false, false);
         }
     }
@@ -388,10 +410,11 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         trun.setVersion(1);
         trun.setSampleDurationPresent(true);
         trun.setSampleSizePresent(true);
-        trun.setSampleCompositionTimeOffsetPresent(false); // bez B-frames
-        trun.setSampleFlagsPresent(true); // explicitně nastavíme flags per-sample
+        trun.setSampleCompositionTimeOffsetPresent(false); // no B-frames
+        trun.setSampleFlagsPresent(true);
+        trun.setDataOffsetPresent(true); // <-- REQUIRED
 
-        List<TrackRunBox.Entry> entries = new ArrayList<TrackRunBox.Entry>(samples.size());
+        List<TrackRunBox.Entry> entries = new ArrayList<>(samples.size());
         for (StreamingSample s : samples) {
             TrackRunBox.Entry e = new TrackRunBox.Entry();
             e.setSampleSize(s.getContent().limit());
@@ -402,6 +425,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         trun.setEntries(entries);
         parent.addBox(trun);
     }
+
 
     private SampleFlags buildFlags(boolean key) {
         SampleFlags f = new SampleFlags();
