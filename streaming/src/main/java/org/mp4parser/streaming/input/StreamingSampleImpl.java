@@ -52,6 +52,10 @@ public class StreamingSampleImpl implements StreamingSample {
         return duration;
     }
 
+    public void setDuration(long duration) {
+        this.duration = duration;
+    }
+
     public <T extends SampleExtension> T getSampleExtension(Class<T> clazz) {
         return (T) sampleExtensions.get(clazz);
     }

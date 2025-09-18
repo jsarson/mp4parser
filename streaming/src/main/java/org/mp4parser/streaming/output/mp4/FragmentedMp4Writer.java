@@ -228,6 +228,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                 }
             }
         }
+        if (firstKey != 0) throw new IllegalStateException("this can't happen");
         if (firstKey == -1 || secondKey == -1) {
             if (!force) return;
             secondKey = vBuf.size();
@@ -265,9 +266,6 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         long vBase = nextFragmentStartTs.get(v);
         long aBase = nextFragmentStartTs.get(a);
 
-        System.out.println("audio base: " + aBase + ", video base: " + vBase + ", diff: " + (aBase - vBase));
-        System.out.println("audio buffer: " + aBuf.size() + ", video buffer: " + vBuf.size() + ", diff: " + (aBuf.size() - vBuf.size()));
-
         MovieFragmentBox moof = new MovieFragmentBox();
         MovieFragmentHeaderBox mfhd = new MovieFragmentHeaderBox();
         mfhd.setSequenceNumber(sequenceNumber);
@@ -299,9 +297,15 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         aBuf.subList(0, aSel.size()).clear();
 
         if (outputCallback != null) {
-            long durMs = Math.min((vUsed * 1000) / v.getTimescale(), (aUsed * 1000) / a.getTimescale());
+            double durMs = (vUsed * 1000.0) / v.getTimescale();
             outputCallback.onSegmentReady(v, durMs, false, false);
         }
+
+        // Debug log: compare audio vs video base in LCM ticks
+        long vBaseLcm = scaleTo(nextFragmentStartTs.get(v), v.getTimescale(), lcmTimescale);
+        long aBaseLcm = scaleTo(nextFragmentStartTs.get(a), a.getTimescale(), lcmTimescale);
+        // long diff = aBaseLcm - vBaseLcm;
+        // System.out.printf("Segment %s bases -> audio: %s | video: %s | diff(lcm ticks): %s\n", sequenceNumber-1, aBaseLcm, vBaseLcm, diff);
     }
 
     private void createTrafWithGroups(StreamingTrack track, MovieFragmentBox moof, List<StreamingSample> samples, long baseTs, boolean isVideo) {
@@ -369,6 +373,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
         List<TrackRunBox.Entry> entries = new ArrayList<>(samples.size());
         for (StreamingSample s : samples) {
+            System.out.println("sample durations: " + track + " | " + s.getDuration());
             TrackRunBox.Entry e = new TrackRunBox.Entry();
             e.setSampleSize(s.getContent().limit());
             e.setSampleDuration(s.getDuration());
@@ -430,18 +435,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         return s;
     }
 
-    private long toMs(long ts, long timescale) {
-        return (long) ((ts * 1000.0) / timescale);
-    }
-
     // Integer scaling helper: convert timestamp from fromScale to toScale using floor (no rounding up)
     private long scaleTo(long ts, long fromScale, long toScale) {
         if (fromScale == toScale) return ts;
         return (ts * toScale) / fromScale; // floor to ensure audio never runs ahead of video
-    }
-
-    private long scaleTs(long ts, long fromScale, long toScale) {
-        return fromScale == toScale ? ts : (long) Math.floor((ts * (double) toScale) / (double) fromScale + 0.5);
     }
 
     private boolean isKeyframeSample(StreamingSample s) {
