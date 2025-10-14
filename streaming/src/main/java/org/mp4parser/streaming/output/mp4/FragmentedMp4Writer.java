@@ -74,6 +74,23 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private long lcmTimescale = 0;
     private long audioSyncErrLcm = 0; // carried between fragments to decide 93/94 AAC frames, etc.
 
+    /**
+     * Error compensation for segment duration reporting.
+     * Ensures that the sum of reported durations matches the true total duration in ticks.
+     * This prevents rounding errors from accumulating over time.
+     *
+     * Why is this needed?
+     * When converting segment durations from timescale ticks to milliseconds, rounding errors occur.
+     * For example, with timescale=90000 and segment duration=3003 ticks:
+     *   (3003 * 1000) / 90000 = 33.366... ms → rounded to 33 ms
+     * Max error per segment: ~0.366 ms
+     * After 10,000 segments: 0.366 ms * 10,000 = 3,660 ms = 3.66 s (as s theoretical maximum, it reality will be much lower)
+     * Without compensation, the backend would see a drift of a small seconds per day.
+     * This mechanism ensures the total reported duration always matches the true duration.
+     */
+    private long totalVideoTicksReported = 0;
+    private long totalVideoMsReported = 0;
+
     public FragmentedMp4Writer(List<StreamingTrack> source, WritableByteChannel sink) throws IOException {
         this.source = new LinkedList<>(source);
         this.sink = sink;
@@ -296,16 +313,21 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         vBuf.subList(0, secondKey).clear();
         aBuf.subList(0, aSel.size()).clear();
 
+        // === Accurate segment duration reporting with error compensation ===
         if (outputCallback != null) {
-            double durMs = (vUsed * 1000.0) / v.getTimescale();
-            outputCallback.onSegmentReady(v, durMs, false, false);
+            // Accumulate total ticks
+            totalVideoTicksReported += vUsed;
+            // Calculate ideal total ms
+            long idealTotalMs = (totalVideoTicksReported * 1000L) / v.getTimescale();
+            // Calculate segment ms (rounded)
+            long segmentMs = (vUsed * 1000L) / v.getTimescale();
+            // Calculate compensated segment ms so that total always matches ideal
+            long compensatedSegmentMs = idealTotalMs - totalVideoMsReported;
+            // Update reported total
+            totalVideoMsReported = idealTotalMs;
+            // Report compensated segment duration
+            outputCallback.onSegmentReady(v, compensatedSegmentMs, false, false);
         }
-
-        // Debug log: compare audio vs video base in LCM ticks
-        long vBaseLcm = scaleTo(nextFragmentStartTs.get(v), v.getTimescale(), lcmTimescale);
-        long aBaseLcm = scaleTo(nextFragmentStartTs.get(a), a.getTimescale(), lcmTimescale);
-        // long diff = aBaseLcm - vBaseLcm;
-        // System.out.printf("Segment %s bases -> audio: %s | video: %s | diff(lcm ticks): %s\n", sequenceNumber-1, aBaseLcm, vBaseLcm, diff);
     }
 
     private void createTrafWithGroups(StreamingTrack track, MovieFragmentBox moof, List<StreamingSample> samples, long baseTs, boolean isVideo) {
@@ -373,7 +395,6 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
         List<TrackRunBox.Entry> entries = new ArrayList<>(samples.size());
         for (StreamingSample s : samples) {
-            System.out.println("sample durations: " + track + " | " + s.getDuration());
             TrackRunBox.Entry e = new TrackRunBox.Entry();
             e.setSampleSize(s.getContent().limit());
             e.setSampleDuration(s.getDuration());
