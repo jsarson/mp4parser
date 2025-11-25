@@ -40,7 +40,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -431,15 +430,13 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
     private StreamingTrack findVideoTrack() {
         for (StreamingTrack t : source) {
-            String n = t.getClass().getSimpleName().toLowerCase(Locale.ROOT);
-            if (n.contains("h264") || n.contains("avc") || n.contains("video")) return t;
+            if (t instanceof CameritoStream s && s.getType() == CameritoStream.Type.VIDEO) return t;
         }
         return null;
     }
     private StreamingTrack findAudioTrack() {
         for (StreamingTrack t : source) {
-            String n = t.getClass().getSimpleName().toLowerCase(Locale.ROOT);
-            if (n.contains("aac") || n.contains("audio") || n.contains("mp4a")) return t;
+            if (t instanceof CameritoStream s && s.getType() == CameritoStream.Type.AUDIO) return t;
         }
         return null;
     }
