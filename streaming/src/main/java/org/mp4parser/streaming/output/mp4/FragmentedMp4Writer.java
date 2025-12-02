@@ -486,16 +486,21 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     }
 
     public String stats() {
-        var audio = getAudioBuffer();
-        var video = getVideoBuffer();
-        var keyCount = countKeyFrames();
+        try {
+            var audio = getAudioBuffer();
+            var video = getVideoBuffer();
+            var keyCount = countKeyFrames();
 
-        StringBuilder b = new StringBuilder();
-        for (int i = 0; i < min(60, video.size()); i++) {
-            b.append(isKeyframeSample(video.get(i)) ? '1' : '0');
+            StringBuilder b = new StringBuilder();
+            for (int i = 0; i < min(60, video.size()); i++) {
+                b.append(isKeyframeSample(video.get(i)) ? '1' : '0');
+            }
+            if (video.size() > 60) b.append("...");
+
+            return String.format("video=%s, audio=%s, video-key=%s, abnormal-key-frames=%s, video-buf=%s", video.size(), audio.size(), keyCount, abnormalNumberOfKeyFramesCounter, b);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "failed to get stats";
         }
-        if (video.size() > 60) b.append("...");
-
-        return String.format("video=%s, audio=%s, video-key=%s, abnormal-key-frames=%s, video-buf=%s", video.size(), audio.size(), keyCount, abnormalNumberOfKeyFramesCounter, b);
     }
 }
