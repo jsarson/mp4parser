@@ -491,10 +491,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         var keyCount = countKeyFrames();
 
         StringBuilder b = new StringBuilder();
-        for (int i = 0; i < min(30, video.size()); i++) {
+        for (int i = 0; i < min(60, video.size()); i++) {
             b.append(isKeyframeSample(video.get(i)) ? '1' : '0');
         }
-        if (video.size() > 30) b.append("...");
+        if (video.size() > 60) b.append("...");
 
         return String.format("video=%s, audio=%s, video-key=%s, abnormal-key-frames=%s, video-buf=%s", video.size(), audio.size(), keyCount, abnormalNumberOfKeyFramesCounter, b);
     }
