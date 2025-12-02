@@ -1,5 +1,7 @@
 package org.mp4parser.streaming.output.mp4;
 
+import static java.lang.Math.min;
+
 import org.mp4parser.Box;
 import org.mp4parser.IsoFile;
 import org.mp4parser.boxes.iso14496.part12.MediaHeaderBox;
@@ -220,6 +222,16 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         return mdhd;
     }
 
+    private List<StreamingSample> getVideoBuffer() {
+        return sampleBuffers.get(findVideoTrack());
+    }
+
+    private List<StreamingSample> getAudioBuffer() {
+        return sampleBuffers.get(findAudioTrack());
+    }
+
+    int abnormalNumberOfKeyFramesCounter = 0;
+
     private synchronized void maybeFlushFragment(boolean force) throws IOException {
         StreamingTrack v = findVideoTrack();
         StreamingTrack a = findAudioTrack();
@@ -248,6 +260,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         if (firstKey == -1 || secondKey == -1) {
             if (!force) return;
             secondKey = vBuf.size();
+        }
+
+        if (countKeyFrames() > 2) {
+            abnormalNumberOfKeyFramesCounter += 1;
         }
 
         // select video samples up to (but not including) second keyframe
@@ -462,5 +478,24 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private boolean isKeyframeSample(StreamingSample s) {
         SampleFlagsSampleExtension f = s.getSampleExtension(SampleFlagsSampleExtension.class);
         return f == null || f.isSyncSample();
+    }
+
+    public long countKeyFrames() {
+        var video = getVideoBuffer();
+        return video.stream().filter(this::isKeyframeSample).count();
+    }
+
+    public String stats() {
+        var audio = getAudioBuffer();
+        var video = getVideoBuffer();
+        var keyCount = countKeyFrames();
+
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < min(30, video.size()); i++) {
+            b.append(isKeyframeSample(video.get(i)) ? '1' : '0');
+        }
+        if (video.size() > 30) b.append("...");
+
+        return String.format("video=%s, audio=%s, video-key=%s, abnormal-key-frames=%s, video-buf=%s", video.size(), audio.size(), keyCount, abnormalNumberOfKeyFramesCounter, b);
     }
 }
