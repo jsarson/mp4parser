@@ -135,7 +135,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     public synchronized void close() throws IOException {
         maybeFlushFragment(true);
         writeFooter(createFooter());
-        if (outputCallback != null) outputCallback.onSegmentReady(null, 0, false, true);
+        if (outputCallback != null) outputCallback.onSegmentReady(null, 0, false, true, false);
     }
 
     protected void writeHeader(Box... boxes) throws IOException {
@@ -165,7 +165,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         }
         writeHeader(createHeader());
         headerWritten = true;
-        if (outputCallback != null) outputCallback.onSegmentReady(null, 0, true, false);
+        if (outputCallback != null) outputCallback.onSegmentReady(null, 0, true, false, false);
     }
 
     protected Box[] createHeader() {
@@ -341,7 +341,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             // Update reported total
             totalVideoMsReported = idealTotalMs;
             // Report compensated segment duration
-            outputCallback.onSegmentReady(v, compensatedSegmentMs, false, false);
+            outputCallback.onSegmentReady(v, compensatedSegmentMs, false, false, force);
         }
     }
 
