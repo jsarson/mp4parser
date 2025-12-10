@@ -1,5 +1,6 @@
 plugins {
-    application
+    // This module is packaged as a plain Java library; no application entry point.
+    `java-library`
 }
 
 java {
@@ -14,7 +15,9 @@ dependencies {
     implementation("org.slf4j:slf4j-api:1.7.36")
     implementation("org.slf4j:slf4j-android:1.7.30")
 
-    implementation("org.aspectj:aspectjtools:1.9.7")
+    // Only the runtime annotations are needed; the tooling (aspectjtools) pulls in Swing/AWT classes
+    // that are not available on Android and make R8 complain about missing java.desktop classes.
+    implementation("org.aspectj:aspectjrt:1.9.7")
 
     implementation("commons-io:commons-io:2.5")
     implementation("commons-codec:commons-codec:1.16.0")
