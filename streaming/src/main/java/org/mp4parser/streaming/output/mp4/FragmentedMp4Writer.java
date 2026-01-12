@@ -91,6 +91,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
      */
     private long totalVideoTicksReported = 0;
     private long totalVideoMsReported = 0;
+    boolean isClosed = false;
 
     public FragmentedMp4Writer(List<StreamingTrack> source, WritableByteChannel sink) throws IOException {
         this.source = new LinkedList<>(source);
@@ -125,6 +126,12 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
     @Override
     public synchronized void acceptSample(StreamingSample sample, StreamingTrack track) throws IOException {
+        if (isClosed) {
+            throw new IllegalStateException("writer is closed");
+        }
+        if (findVideoTrack() == track && getVideoBuffer().isEmpty() && !isKeyframeSample(sample)) {
+            throw new IllegalStateException("appending non key frame as first sample in video buffer");
+        }
         writeHeaderIfReady(track);
         sampleBuffers.get(track).add(sample);
         nextSampleStartTs.put(track, nextSampleStartTs.get(track) + sample.getDuration());
@@ -133,6 +140,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
     @Override
     public synchronized void close() throws IOException {
+        isClosed = true;
         maybeFlushFragment(true);
         writeFooter(createFooter());
         if (outputCallback != null) outputCallback.onSegmentReady(null, 0, false, true, false);
@@ -327,6 +335,16 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
         vBuf.subList(0, secondKey).clear();
         aBuf.subList(0, aSel.size()).clear();
+
+        if (vBuf.isEmpty()) {
+           if (!force)  {
+               throw new IllegalStateException("empty buffer after non force flush ... imposible");
+           }
+        } else {
+            if (!isKeyframeSample(vBuf.get(0))) {
+                throw new IllegalStateException("key frame is not left in buffer after flush");
+            }
+        }
 
         // === Accurate segment duration reporting with error compensation ===
         if (outputCallback != null) {
