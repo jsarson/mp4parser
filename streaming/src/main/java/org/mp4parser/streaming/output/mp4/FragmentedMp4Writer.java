@@ -92,8 +92,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
     private long totalVideoTicksReported = 0;
     private long totalVideoMsReported = 0;
     boolean isClosed = false;
+    CrashlyticsLoggerMP4 logger;
 
-    public FragmentedMp4Writer(List<StreamingTrack> source, WritableByteChannel sink) throws IOException {
+    public FragmentedMp4Writer(List<StreamingTrack> source, WritableByteChannel sink, CrashlyticsLoggerMP4 logger) throws IOException {
+        this.logger = logger;
         this.source = new LinkedList<>(source);
         this.sink = sink;
         this.creationTime = new Date();
@@ -247,6 +249,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
         List<StreamingSample> vBuf = sampleBuffers.get(v);
         List<StreamingSample> aBuf = sampleBuffers.get(a);
+        if (countKeyFrames() >= 2 && aBuf.isEmpty()) logger.logNonFatal(new IllegalStateException("MUXER: no audio samples in buffer"));
         if (vBuf.isEmpty() || aBuf.isEmpty()) return;
 
         // compute/update LCM timescale for stable integer math
@@ -298,7 +301,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
                 break; // adding next sample would overshoot desired total
             }
         }
-        if (aSel.isEmpty()) return;
+        if (aSel.isEmpty()) {
+            logger.logNonFatal(new IllegalStateException("MUXER: no audio samples selected"));
+            return;
+        }
 
         // update error accumulator so cumulative audio == cumulative video over time
         audioSyncErrLcm = desiredAudioTotalLcm - aAccLcm; // bounded by < one audio sample in LCM ticks
@@ -338,9 +344,10 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
         if (vBuf.isEmpty()) {
            if (!force)  {
-               throw new IllegalStateException("empty buffer after non force flush ... imposible");
+               throw new IllegalStateException("empty buffer after non force flush ... impossible");
            }
         } else {
+            // should not be reached by force flush, force flush will always make buffer empty
             if (!isKeyframeSample(vBuf.get(0))) {
                 throw new IllegalStateException("key frame is not left in buffer after flush");
             }
