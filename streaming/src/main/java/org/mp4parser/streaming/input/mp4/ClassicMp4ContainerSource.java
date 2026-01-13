@@ -1,10 +1,20 @@
 package org.mp4parser.streaming.input.mp4;
 
+import static org.mp4parser.tools.CastUtils.l2i;
+
 import org.mp4parser.BasicContainer;
 import org.mp4parser.Box;
 import org.mp4parser.BoxParser;
 import org.mp4parser.PropertyBoxParserImpl;
-import org.mp4parser.boxes.iso14496.part12.*;
+import org.mp4parser.boxes.iso14496.part12.CompositionTimeToSample;
+import org.mp4parser.boxes.iso14496.part12.DegradationPriorityBox;
+import org.mp4parser.boxes.iso14496.part12.SampleDependencyTypeBox;
+import org.mp4parser.boxes.iso14496.part12.SampleDescriptionBox;
+import org.mp4parser.boxes.iso14496.part12.SampleSizeBox;
+import org.mp4parser.boxes.iso14496.part12.SampleTableBox;
+import org.mp4parser.boxes.iso14496.part12.SampleToChunkBox;
+import org.mp4parser.boxes.iso14496.part12.TimeToSampleBox;
+import org.mp4parser.boxes.iso14496.part12.TrackBox;
 import org.mp4parser.streaming.StreamingSample;
 import org.mp4parser.streaming.StreamingTrack;
 import org.mp4parser.streaming.TrackExtension;
@@ -14,20 +24,25 @@ import org.mp4parser.streaming.extensions.SampleFlagsSampleExtension;
 import org.mp4parser.streaming.extensions.TrackIdTrackExtension;
 import org.mp4parser.streaming.input.StreamingSampleImpl;
 import org.mp4parser.streaming.output.SampleSink;
-import org.mp4parser.streaming.output.mp4.FragmentedMp4Writer;
 import org.mp4parser.tools.Path;
 
-import java.io.*;
+import java.io.File;
+import java.io.FilterInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.ReadableByteChannel;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.concurrent.Callable;
-
-import static org.mp4parser.tools.CastUtils.l2i;
 
 /**
  * Creates a List of StreamingTrack from a classic MP4. Fragmented MP4s don't
@@ -80,11 +95,11 @@ public class ClassicMp4ContainerSource implements Callable<Void> {
         }
         List<StreamingTrack> streamingTracks = classicMp4ContainerSource.getTracks();
         File f = new File("output.mp4");
-        FragmentedMp4Writer writer = new FragmentedMp4Writer(streamingTracks, new FileOutputStream(f).getChannel());
+        // FragmentedMp4Writer writer = new FragmentedMp4Writer(streamingTracks, new FileOutputStream(f).getChannel());
 
         System.out.println("Reading and writing started.");
         classicMp4ContainerSource.call();
-        writer.close();
+        // writer.close();
         System.err.println(f.getAbsolutePath());
 
     }
