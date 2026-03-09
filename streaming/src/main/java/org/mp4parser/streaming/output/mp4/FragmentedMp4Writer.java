@@ -279,7 +279,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
         // select video samples up to (but not including) second keyframe
         List<StreamingSample> vSel = new ArrayList<>(vBuf.subList(firstKey, secondKey));
-        if (vSel.isEmpty()) return;
+        if (vSel.isEmpty()) throw new IllegalStateException();
 
         // exact video duration in ticks and in LCM ticks
         long vDur = sumDur(vSel);
@@ -438,7 +438,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             TrackRunBox.Entry e = new TrackRunBox.Entry();
             e.setSampleSize(s.getContent().limit());
             e.setSampleDuration(s.getDuration());
-            e.setSampleFlags(buildFlags(isKeyframeSample(s)));
+            e.setSampleFlags(buildFlags(findAudioTrack() == track ? true : isKeyframeSample(s)));
             entries.add(e);
         }
         trun.setEntries(entries);
@@ -502,6 +502,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
 
     private boolean isKeyframeSample(StreamingSample s) {
         SampleFlagsSampleExtension f = s.getSampleExtension(SampleFlagsSampleExtension.class);
+        if (f == null) throw new IllegalStateException("SampleFlagsSampleExtension can't be null");
         return f == null || f.isSyncSample();
     }
 
