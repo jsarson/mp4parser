@@ -384,20 +384,23 @@ public abstract class H264NalConsumingTrack extends AbstractH264Track {
     }
 
     protected void handlePPS(ByteBuffer nal) {
-        ((ByteBuffer)nal).position(1);
+        ByteBuffer storedNal = nal.duplicate();
+        storedNal.position(0);
+        ByteBuffer parsedNal = removeEmulationPreventionBytes(storedNal);
+        parsedNal.position(1);
         PictureParameterSet _pictureParameterSet = null;
         try {
-            _pictureParameterSet = PictureParameterSet.read(nal);
+            _pictureParameterSet = PictureParameterSet.read(parsedNal);
             currentPictureParameterSet = _pictureParameterSet;
 
 
             ByteBuffer oldPpsSameId = ppsIdToPpsBytes.get(_pictureParameterSet.pic_parameter_set_id);
 
 
-            if (oldPpsSameId != null && !oldPpsSameId.equals(nal)) {
+            if (oldPpsSameId != null && !oldPpsSameId.equals(storedNal)) {
                 throw new RuntimeException("OMG - I got two SPS with same ID but different settings! (AVC3 is the solution)");
             } else {
-                ppsIdToPpsBytes.put(_pictureParameterSet.pic_parameter_set_id, nal);
+                ppsIdToPpsBytes.put(_pictureParameterSet.pic_parameter_set_id, storedNal);
                 ppsIdToPps.put(_pictureParameterSet.pic_parameter_set_id, _pictureParameterSet);
             }
         } catch (IOException e) {
@@ -408,17 +411,20 @@ public abstract class H264NalConsumingTrack extends AbstractH264Track {
     }
 
     protected void handleSPS(ByteBuffer data) {
-        ((ByteBuffer)data).position(1);
+        ByteBuffer storedNal = data.duplicate();
+        storedNal.position(0);
+        ByteBuffer parsedNal = removeEmulationPreventionBytes(storedNal);
+        parsedNal.position(1);
         try {
-            SeqParameterSet _seqParameterSet = SeqParameterSet.read(data);
+            SeqParameterSet _seqParameterSet = SeqParameterSet.read(parsedNal);
 
             currentSeqParameterSet = _seqParameterSet;
 
             ByteBuffer oldSpsSameId = spsIdToSpsBytes.get(_seqParameterSet.seq_parameter_set_id);
-            if (oldSpsSameId != null && !oldSpsSameId.equals(data)) {
+            if (oldSpsSameId != null && !oldSpsSameId.equals(storedNal)) {
                 throw new RuntimeException("OMG - I got two SPS with same ID but different settings!");
             } else {
-                spsIdToSpsBytes.put(_seqParameterSet.seq_parameter_set_id, data);
+                spsIdToSpsBytes.put(_seqParameterSet.seq_parameter_set_id, storedNal);
                 spsIdToSps.put(_seqParameterSet.seq_parameter_set_id, _seqParameterSet);
                 spsForConfig.add(_seqParameterSet);
             }
@@ -426,6 +432,31 @@ public abstract class H264NalConsumingTrack extends AbstractH264Track {
             throw new RuntimeException("That's surprising to get IOException when working on ByteArrayInputStream", e);
         }
 
+    }
+
+    private ByteBuffer removeEmulationPreventionBytes(ByteBuffer nal) {
+        byte[] source = new byte[nal.remaining()];
+        ByteBuffer sourceBuffer = nal.duplicate();
+        sourceBuffer.position(0);
+        sourceBuffer.get(source);
+
+        ByteBuffer cleaned = ByteBuffer.allocate(source.length);
+        if (source.length > 0) {
+            cleaned.put(source[0]);
+        }
+
+        for (int i = 1; i < source.length; i++) {
+            if (i >= 3 &&
+                    source[i] == 0x03 &&
+                    source[i - 1] == 0x00 &&
+                    source[i - 2] == 0x00) {
+                continue;
+            }
+            cleaned.put(source[i]);
+        }
+
+        cleaned.flip();
+        return cleaned;
     }
 
     public void close() throws IOException {
