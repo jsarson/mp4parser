@@ -289,17 +289,12 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         long desiredAudioTotalLcm = vDurLcm + audioSyncErrLcm;
         List<StreamingSample> aSel = new ArrayList<>();
         long aAccLcm = 0;
-        int aIdx = 0;
-        while (aIdx < aBuf.size()) {
-            StreamingSample s = aBuf.get(aIdx);
+        for (var s : aBuf) {
             long sLcm = scaleTo(s.getDuration(), a.getTimescale(), lcm);
-            if (aAccLcm + sLcm <= desiredAudioTotalLcm) {
-                aSel.add(s);
-                aAccLcm += sLcm;
-                aIdx++;
-            } else {
-                break; // adding next sample would overshoot desired total
-            }
+            if (aAccLcm + sLcm > desiredAudioTotalLcm) break; // adding next sample would overshoot desired total
+
+            aSel.add(s);
+            aAccLcm += sLcm;
         }
         if (aSel.isEmpty()) {
             logger.logNonFatal(new IllegalStateException("MUXER: no audio samples selected"));
@@ -307,7 +302,8 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
         }
 
         // update error accumulator so cumulative audio == cumulative video over time
-        audioSyncErrLcm = desiredAudioTotalLcm - aAccLcm; // bounded by < one audio sample in LCM ticks
+        // 0 <= audioSyncErrLcm < one audio sample in LCM ticks
+        audioSyncErrLcm = desiredAudioTotalLcm - aAccLcm;
 
         long vBase = nextFragmentStartTs.get(v);
         long aBase = nextFragmentStartTs.get(a);
@@ -523,7 +519,7 @@ public class FragmentedMp4Writer extends DefaultBoxes implements SampleSink {
             }
             if (video.size() > 60) b.append("...");
 
-            return String.format("video=%s, audio=%s, video-key=%s, abnormal-key-frames=%s, video-buf=%s", video.size(), audio.size(), keyCount, abnormalNumberOfKeyFramesCounter, b);
+            return String.format("video=%s, audio=%s, video-key=%s, abnormal-key-frames=%s, audioErrLcm=%s, video-buf=%s", video.size(), audio.size(), keyCount, abnormalNumberOfKeyFramesCounter, audioSyncErrLcm, b);
         } catch (Exception e) {
             e.printStackTrace();
             return "failed to get stats";
